@@ -43,6 +43,14 @@ extension Receiver {
         let levels = Receiver(waveform: [bin], tc: tc, meters: [0.1,0,0,0])
         assert(Snapshot(receivers: [base]).sameControls(as: Snapshot(receivers: [levels])))
         assert(!base.sameControls(as: Receiver(transmitters: [Transmitter(index: 2, label: "人物A")], waveform: [], tc: tc)))
+        var changed = base; changed.lossless = 1
+        assert(!base.sameControls(as: changed))
+        var tx = Transmitter(index: 2, label: "人物A"); tx.gain_db = 0; tx.agc = 0
+        let manual = Receiver(transmitters: [tx], waveform: [], tc: tc)
+        tx.agc = 2
+        assert(!manual.sameControls(as: Receiver(transmitters: [tx], waveform: [], tc: tc)))
+        tx.agc = 0; tx.gain_db = -1
+        assert(!manual.sameControls(as: Receiver(transmitters: [tx], waveform: [], tc: tc)))
         var meter = MeterState()
         meter.update(amplitude: 0.1, now: 1); assert(abs(meter.peak + 20) < 0.001)
         meter.update(amplitude: 0, now: 1.1); assert(meter.peak == -20 && meter.level < -20)

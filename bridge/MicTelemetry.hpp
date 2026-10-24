@@ -5,12 +5,13 @@
 namespace dji {
 struct TransmitterState {
     unsigned index=0;std::string serial,noise="unknown";
+    int gain=-1000,agc=-1,agcMode=-1,agcEnabled=-1;
     int battery=-1,total=-1,remaining=-1;bool charging=false,recording=false;
 };
 struct Telemetry {
     double observedHostSeconds=0;
     bool known=false,tcEnabled=false,allRecording=false,charging=false;
-    int fps=-1,output=-1,battery=-1;
+    int fps=-1,output=-1,battery=-1,lossless=-1,gain=-1000;
     std::string timecode;
     std::map<unsigned,TransmitterState> transmitters;
 };
@@ -27,9 +28,11 @@ public:
             if(type==1&&index>=1&&index<=4&&len>=12){std::string serial((const char*)v+4,len-4);while(!serial.empty()&&serial.back()==0)serial.pop_back();if(validSerial(serial)){auto& tx=state.transmitters[index];tx.index=index;tx.serial=serial;}}
             if(type==2&&index>=1&&index<=4&&len>=26){auto& tx=state.transmitters[index];tx.index=index;unsigned w=le16(v)|uint32_t(le16(v+2))<<16;
                 tx.noise=!(w&256)?"none":((w>>5)&3)==0?"basic":((w>>5)&3)==1?"strong":"unknown";
+                tx.gain=(int8_t)v[7];tx.agcMode=le16(v+4)>>14;tx.agcEnabled=(w>>18)&1;tx.agc=!tx.agcEnabled?0:(tx.agcMode==1||tx.agcMode==2)?tx.agcMode:-1;
                 tx.battery=(w>>10)&7;tx.charging=(w>>9)&1;tx.recording=(w>>28)&1;tx.total=le16(v+8);tx.remaining=le16(v+10);
             }
             if(type==3&&index==0&&len>=32){state.known=true;unsigned w=le16(v);state.battery=(w>>13)&7;state.charging=(w>>12)&1;state.allRecording=(w>>6)&1;
+                state.lossless=(w>>2)&1;state.gain=(int8_t)v[2];
                 state.tcEnabled=(v[8]>>4)&1;state.fps=v[17]<=7?v[17]:-1;state.output=v[19]<=3?v[19]:-1;
                 if(v[13]<24&&v[14]<60&&v[15]<60&&v[16]<60){char tc[20];snprintf(tc,sizeof(tc),"%02u:%02u:%02u:%02u",v[13],v[14],v[15],v[16]);state.timecode=tc;}
             }

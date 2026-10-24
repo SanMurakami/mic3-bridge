@@ -12,6 +12,19 @@ int main(){
   assert(state.state.timecode=="00:27:34:08");assert(state.state.battery==1);
   auto t=state.state.transmitters.at(2);assert(t.recording&&t.noise=="basic"&&t.total==286&&t.remaining==278&&t.battery==1);
  }
+ // signed gain / AGC OFF・AUTO・DYN・未知enum / RX losslessを独立に検証。
+ for(int mode=0;mode<4;mode++)for(int enabled=0;enabled<2;enabled++){
+  std::vector<uint8_t> data(26);data[2]=enabled?4:0;data[5]=uint8_t(mode<<6);data[7]=uint8_t(-12);
+  std::vector<uint8_t> payload={3,32,0,2,2,0,0,0,26};payload.insert(payload.end(),data.begin(),data.end());auto packet=frame(payload);
+  dji::TelemetryParser state;state.frame(packet.data(),packet.size());auto t=state.state.transmitters.at(2);
+  assert(t.gain==-12&&t.agcEnabled==enabled&&t.agcMode==mode);
+  assert(t.agc==(!enabled?0:(mode==1||mode==2)?mode:-1));
+ }
+ for(int lossless=0;lossless<2;lossless++){
+  std::vector<uint8_t> data(32);data[0]=lossless?4:0;data[2]=uint8_t(-1);
+  std::vector<uint8_t> payload={3,38,0,3,0,0,0,0,32};payload.insert(payload.end(),data.begin(),data.end());auto packet=frame(payload);
+  dji::TelemetryParser state;state.frame(packet.data(),packet.size());assert(state.state.lossless==lossless&&state.state.gain==-1);
+ }
  // 途切れた record、破損した CRC を事実として反映しない。
  p.back()=0;p.pop_back();p[1]--;auto truncated=frame(p);dji::TelemetryParser t;t.frame(truncated.data(),truncated.size());assert(!t.state.known);
  f.back()^=1;dji::IdentityParser parser;parser.onFrame=[&](auto data,auto n){t.frame(data,n);};parser.append(f.data(),f.size());assert(!t.state.known);

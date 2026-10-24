@@ -6,6 +6,9 @@ struct ReceiverOverview: View {
     var body: some View {
         VStack(spacing: 1) {
             HStack(spacing: 8) {
+                Toggle("一括操作の対象", isOn: Binding(get: { !store.excluded.contains(receiver.serial) }, set: {
+                    if $0 { store.excluded.remove(receiver.serial) } else { store.excluded.insert(receiver.serial) }
+                })).toggleStyle(.checkbox).labelsHidden().disabled(!receiver.connected)
                 StatusDot(active: receiver.connected)
                 Text(receiver.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
                 Spacer()
@@ -13,6 +16,7 @@ struct ReceiverOverview: View {
                     .foregroundStyle(receiver.tc.known && receiver.tc.enabled && receiver.tc.output == 1 ? .orange : Console.cyan)
                 if receiver.recording { Text("● MAC").foregroundStyle(.red) }
             }.font(.system(size: 9, weight: .semibold, design: .monospaced)).padding(12)
+            HStack { LosslessControl(receiver: receiver, store: store); Spacer() }.padding(.horizontal, 12).padding(.bottom, 10)
             HStack(spacing: 1) {
                 ForEach(receiver.transmitters) { tx in
                     CompactChannel(tx: tx, receiver: receiver, store: store)
@@ -24,6 +28,8 @@ struct ReceiverOverview: View {
                 Text(receiver.tc.known && receiver.tc.enabled ? receiver.tc.timecode : "—:—:—:—")
                 Text(Console.fpsName(receiver.tc.fps))
             }.font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted).padding(10)
+            if receiver.control_busy { ProgressView().controlSize(.mini).padding(8) }
+            else if !receiver.control_message.isEmpty { Text(receiver.control_message).font(.system(size: 9)).foregroundStyle(Console.muted).padding(8) }
             if !receiver.error.isEmpty { Text(receiver.error).font(.caption).foregroundStyle(.orange).padding(8) }
         }.background(Console.panel).clipShape(RoundedRectangle(cornerRadius: 4))
     }
@@ -44,20 +50,18 @@ struct CompactChannel: View {
             }.buttonStyle(.plain).popover(isPresented: $editing) {
                 LabelEditor(tx: tx, receiver: receiver, store: store)
             }
-            ProductionMeter(feed: store.feed(receiver.serial), channel: tx.index - 1)
-            Text(tx.connected && tx.device_recording ? "● TX REC" : "TX STOP").foregroundStyle(tx.connected && tx.device_recording ? .red : Console.muted)
+            HStack(alignment: .top, spacing: 4) {
+                ProductionMeter(feed: store.feed(receiver.serial), channel: tx.index - 1)
+                GainControl(tx: tx, receiver: receiver, store: store)
+            }
+            Text(tx.connected && tx.device_recording ? "● TX REC" : tx.connected ? "TX STOP" : "OFFLINE").foregroundStyle(tx.connected && tx.device_recording ? .red : Console.muted)
             HStack(spacing: 3) {
                 Image(systemName: tx.charging ? "battery.100percent.bolt" : "battery.100percent")
                 Text(tx.connected ? Console.batteryBars(tx.battery_code).map { "\($0)/6" } ?? "—" : "—")
             }
             Text(tx.connected && tx.storage_total > 0 && tx.storage_remaining >= 0 && tx.storage_remaining <= tx.storage_total ? String(format: "空 %.0f%%", Double(tx.storage_remaining) / Double(tx.storage_total) * 100) : "空 —")
                 .foregroundStyle(Console.muted)
-            Picker("ノイキャン CH \(tx.index)", selection: Binding(get: { tx.noise_mode }, set: {
-                store.send("noise", receiver: receiver, values: ["target": String(tx.index), "mode": $0])
-            })) {
-                Text("NONE").tag("none"); Text("BASIC").tag("basic"); Text("STRONG").tag("strong")
-                if tx.noise_mode == "unknown" { Text("—").tag("unknown") }
-            }.labelsHidden().controlSize(.mini).disabled(!tx.connected || receiver.control_busy)
+            ProcessingControls(tx: tx, receiver: receiver, store: store)
         }.font(.system(size: 8, design: .monospaced)).padding(9).frame(maxWidth: .infinity).background(Console.strip)
     }
 }

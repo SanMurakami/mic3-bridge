@@ -57,14 +57,6 @@ struct ProductionMeter: View {
             .accessibilityValue(meter.clipped ? "クリップ" : String(format: "%.1f dBFS", meter.level))
     }
 }
-struct MeterValue: View {
-    @ObservedObject var feed: ReceiverFeed
-    let channel: Int
-    var body: some View {
-        Text(feed.frame.ballistics[channel].level > -60 ? String(format: "%.1f", feed.frame.ballistics[channel].level) : "−∞")
-            .font(.system(size: 21, weight: .light, design: .monospaced)).foregroundStyle(.white).monospacedDigit()
-    }
-}
 struct RecordingCounter: View {
     @ObservedObject var feed: ReceiverFeed
     let recording: Bool

@@ -194,9 +194,25 @@ class Manager {
         NSData *data=[job.output.fileHandleForReading readDataToEndOfFile];id result=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
         if(r!=receivers.end()){r->second.controlBusy=false;bool ok=job.task.terminationStatus==0&&[result isKindOfClass:[NSDictionary class]]&&[result[@"success"] boolValue];
             NSString *message=[result isKindOfClass:[NSDictionary class]]&&[result[@"message"] isKindOfClass:[NSString class]]?result[@"message"]:@"機器の応答を確認できませんでした。";
-            r->second.controlMessage=message.UTF8String;if(!ok)r->second.error=message.UTF8String;identities.refresh(job.serial);}
+            r->second.controlMessage=message.UTF8String;if(!ok)r->second.error=message.UTF8String;
+            if([result isKindOfClass:NSDictionary.class])recordControlChange(r->second,job.task.arguments,result);
+            identities.refresh(job.serial);}
         controlJobs.erase(controlJobs.begin());
         if(r!=receivers.end())r->second.controlBusy=std::any_of(controlJobs.begin(),controlJobs.end(),[&](auto& pending){return pending.serial==r->first;});
+    }
+    void recordControlChange(Receiver& r,NSArray *arguments,NSDictionary *result){
+        if(!r.session||!r.session->recorder)return;
+        auto& session=*r.session;session.drain();
+        NSString *path=[ns(session.recordingPath) stringByAppendingString:@".json"];NSError *error=nil;
+        NSData *original=[NSData dataWithContentsOfFile:path];
+        id raw=original?[NSJSONSerialization JSONObjectWithData:original options:NSJSONReadingMutableContainers error:&error]:nil;
+        if(![raw isKindOfClass:NSMutableDictionary.class]){r.error="録音は継続中ですが、設定変更履歴を保存できませんでした。";return;}
+        NSMutableArray *events=raw[@"control_events"];
+        if(![events isKindOfClass:NSMutableArray.class]){events=[NSMutableArray array];raw[@"control_events"]=events;}
+        [events addObject:@{@"host_seconds":@(mach_absolute_time()/hostFrequency()),@"recorded_frame":@(session.recordedFrames),
+            @"command":arguments,@"success":result[@"success"]?:@NO,@"message":result[@"message"]?:@"",@"status":result[@"status"]?:@{}}];
+        NSData *data=[NSJSONSerialization dataWithJSONObject:raw options:NSJSONWritingPrettyPrinted error:&error];
+        if(!data||![data writeToFile:path options:NSDataWritingAtomic error:&error])r.error="録音は継続中ですが、設定変更履歴を保存できませんでした。";
     }
     void enqueue(Receiver& r,NSArray *arguments,bool priorityStop=false){if(!r.location||(r.controlBusy&&!priorityStop))throw std::runtime_error("接続を確認するか、前の機器操作の完了を待ってください。");
         NSTask *task=[NSTask new];NSPipe *output=[NSPipe pipe];task.standardOutput=output;task.standardError=[NSFileHandle fileHandleWithNullDevice];
@@ -331,8 +347,8 @@ public:
         if(![command isKindOfClass:[NSDictionary class]])return;
         if([command[@"op"] isEqual:@"bus_channels"]||[command[@"op"] isEqual:@"route"]){routingCommand(command);return;}
         NSString *bulkOp=command[@"op"];
-        if([@[@"record_all",@"stop_all",@"device_record_all",@"device_stop_all",@"tc_all",@"refresh_all"] containsObject:bulkOp]){
-            NSString *single=[bulkOp isEqual:@"record_all"]?@"record":[bulkOp isEqual:@"stop_all"]?@"stop":[bulkOp isEqual:@"tc_all"]?@"tc":[bulkOp isEqual:@"refresh_all"]?@"refresh_controls":@"device_record";
+        if([@[@"record_all",@"stop_all",@"device_record_all",@"device_stop_all",@"tc_all",@"refresh_all",@"audio_all"] containsObject:bulkOp]){
+            NSString *single=[bulkOp isEqual:@"audio_all"]?@"audio":[bulkOp isEqual:@"record_all"]?@"record":[bulkOp isEqual:@"stop_all"]?@"stop":[bulkOp isEqual:@"tc_all"]?@"tc":[bulkOp isEqual:@"refresh_all"]?@"refresh_controls":@"device_record";
             NSString *selection=command[@"serials"];NSArray *selected=[selection isKindOfClass:[NSString class]]?[selection componentsSeparatedByString:@","]:nil;
             NSMutableDictionary *values=[command mutableCopy];values[@"op"]=single;
             if([bulkOp hasPrefix:@"device_"])values[@"enabled"]=[bulkOp isEqual:@"device_record_all"]?@"1":@"0";
@@ -367,6 +383,15 @@ public:
                 NSMutableArray *changes=[NSMutableArray arrayWithObject:@{@"label_key":key,@"before":old,@"after":labels[key]}];
                 if(take)[changes addObject:@{@"label_key":take,@"before":before[take]?:@"",@"after":labels[take]}];
                 recordLabelChange(changes);
+            }else if([op isEqual:@"gain"]||[op isEqual:@"agc"]){
+                NSString *target=command[@"target"],*txSerial=command[@"tx_serial"],*value=command[[op isEqual:@"gain"]?@"value":@"mode"];
+                if(![target isKindOfClass:NSString.class]||![txSerial isKindOfClass:NSString.class]||![value isKindOfClass:NSString.class])throw std::runtime_error("送信機と設定値が必要です。");
+                enqueue(r,@[[op isEqual:@"gain"]?@"--gain":@"--agc",ns(r.serial),target,txSerial,value]);
+            }else if([op isEqual:@"lossless"]){NSString *value=command[@"enabled"];if(![value isKindOfClass:NSString.class])throw std::runtime_error("ロスレス設定が必要です。");enqueue(r,@[@"--lossless",ns(r.serial),value]);
+            }else if([op isEqual:@"audio"]){
+                NSString *quality=command[@"lossless"]?:@"-1",*agc=command[@"agc"]?:@"-1",*noise=command[@"noise"]?:@"keep";
+                if(![quality isKindOfClass:NSString.class]||![agc isKindOfClass:NSString.class]||![noise isKindOfClass:NSString.class])throw std::runtime_error("音声設定が不正です。");
+                enqueue(r,@[@"--profile",ns(r.serial),quality,agc,noise]);
             }else if([op isEqual:@"tc"]){
                 auto valid=[](id value,int maximum){if(![value isKindOfClass:[NSString class]])return false;NSString *v=value;return v.length==1&&[v characterAtIndex:0]>='0'&&[v characterAtIndex:0]<='0'+maximum;};
                 if(!valid(command[@"enabled"],1)||!valid(command[@"fps"],7)||!valid(command[@"output"],3))throw std::runtime_error("TC 設定が不正です。");
@@ -409,13 +434,13 @@ public:
             auto state=r.location?identities.status(serial):dji::Telemetry{};rememberTransmitters(r,state);
             NSMutableArray *transmitters=[NSMutableArray array];for(unsigned index=1;index<=4;index++){
                 auto it=state.transmitters.find(index);bool live=it!=state.transmitters.end();const dji::TransmitterState *tx=live?&it->second:nullptr;auto key=labelKey(r,index,tx);NSString *label=labels[ns(key)]?:@"";
-                [transmitters addObject:@{@"index":@(index),@"serial":tx?ns(tx->serial):@"",@"label_key":ns(key),@"label":label,@"connected":@(live),@"noise_mode":tx?ns(tx->noise):@"unknown",@"battery_code":@(tx?tx->battery:-1),@"charging":@(tx&&tx->charging),@"device_recording":@(tx&&tx->recording),@"storage_total":@(tx?tx->total:-1),@"storage_remaining":@(tx?tx->remaining:-1)}];
+                [transmitters addObject:@{@"index":@(index),@"serial":tx?ns(tx->serial):@"",@"label_key":ns(key),@"label":label,@"connected":@(live),@"gain_db":@(tx?tx->gain:-1000),@"agc":@(tx?tx->agc:-1),@"noise_mode":tx?ns(tx->noise):@"unknown",@"battery_code":@(tx?tx->battery:-1),@"charging":@(tx&&tx->charging),@"device_recording":@(tx&&tx->recording),@"storage_total":@(tx?tx->total:-1),@"storage_remaining":@(tx?tx->remaining:-1)}];
             }
             NSMutableArray *wave=[NSMutableArray array];if(s)for(auto& bin:s->waveform.take()){NSMutableArray *low=[NSMutableArray array],*high=[NSMutableArray array];for(unsigned c=0;c<4;c++){[low addObject:@(bin.low[c])];[high addObject:@(bin.high[c])];}[wave addObject:@{@"time":@(bin.time),@"duration":@(bin.duration),@"low":low,@"high":high}];}
             NSDictionary *tc=@{@"observed_host_seconds":@(state.observedHostSeconds),@"known":@(state.known),@"enabled":@(state.tcEnabled),@"fps":@(state.fps),@"output":@(state.output),@"timecode":ns(state.timecode)};
             [rows addObject:@{@"serial":ns(serial),@"name":ns(r.name),@"firmware":ns(r.firmware),@"status":ns(r.status),@"connected":@(s!=nullptr),@"can_delete":@(!s&&!r.location&&!r.inUse),
                 @"source_id":@(s?s->source:0),@"virtual_id":@(s?s->target:0),@"virtual_uid":ns(r.uid()),@"usb_location":[NSString stringWithFormat:@"0x%08x",r.location],
-                @"waveform":wave,@"transmitters":transmitters,@"tc":tc,@"control_message":ns(r.controlMessage),@"battery_code":@(state.battery),@"charging":@(state.charging),@"control_busy":@(r.controlBusy),@"meters":peaks,@"recording":@(s&&s->recorder),@"recorded_seconds":@(frames/rate),@"recording_path":ns(path),@"error":ns(error),@"dropped":@(s?s->dropped.load():0)}];
+                @"gain_db":@(state.gain),@"lossless":@(state.lossless),@"waveform":wave,@"transmitters":transmitters,@"tc":tc,@"control_message":ns(r.controlMessage),@"battery_code":@(state.battery),@"charging":@(state.charging),@"control_busy":@(r.controlBusy),@"meters":peaks,@"recording":@(s&&s->recorder),@"recorded_seconds":@(frames/rate),@"recording_path":ns(path),@"error":ns(error),@"dropped":@(s?s->dropped.load():0)}];
         }
         emit(@{@"host_seconds":@(mach_absolute_time()/hostFrequency()),@"receivers":rows,@"unidentified":@(unidentified),@"error":ns(globalError.empty()?commandError:globalError),@"bus_channels":@(busChannels),@"bus_in_use":@(busInUse),@"routes":routes});
     }

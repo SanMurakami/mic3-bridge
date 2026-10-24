@@ -6,6 +6,12 @@ import AVFoundation
     @Published var snapshot = Snapshot()
     @Published var failure = ""
     @Published var running = false
+    @Published var settingsLocked = UserDefaults.standard.bool(forKey: "settingsLocked") {
+        didSet { UserDefaults.standard.set(settingsLocked, forKey: "settingsLocked") }
+    }
+    @Published var recordingMode = UserDefaults.standard.string(forKey: "recordingMode") ?? "mac" {
+        didSet { UserDefaults.standard.set(recordingMode, forKey: "recordingMode") }
+    }
     var histories: [String: WaveHistory] = [:]
     let clock = LiveClock()
     private var feeds: [String: ReceiverFeed] = [:]
@@ -14,7 +20,9 @@ import AVFoundation
         let created = ReceiverFeed(); feeds[serial] = created; return created
     }
     var timelineOrigin: Double?
-    @Published var excluded: Set<String> = []
+    @Published var excluded: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "excludedReceivers") ?? []) {
+        didSet { UserDefaults.standard.set(Array(excluded).sorted(), forKey: "excludedReceivers") }
+    }
     var targets: [Receiver] { snapshot.receivers.filter { $0.connected && !excluded.contains($0.serial) } }
     var targetsBusy: Bool { targets.contains { $0.control_busy } }
     func bulk(_ op: String, values: [String: String] = [:]) {
@@ -108,6 +116,8 @@ import AVFoundation
         var command = values; command["serial"] = receiver.serial; send(op, values: command)
     }
     func send(_ op: String, values: [String: String] = [:]) {
+        let guarded: Set<String> = ["gain", "agc", "lossless", "audio_all", "noise", "tc", "tc_all", "route", "bus_channels", "delete", "rename"]
+        guard !settingsLocked || !guarded.contains(op) else { return }
         var command = values; command["op"] = op
         do {
             var data = try JSONSerialization.data(withJSONObject: command); data.append(10)
@@ -227,16 +237,10 @@ struct MicrophoneStrip: View {
                 .popover(isPresented: $editingLabel) {
                     LabelEditor(tx: tx, receiver: receiver, store: store)
                 }
-            HStack(spacing: 16) {
-                ProductionMeter(feed: store.feed(receiver.serial), channel: tx.index - 1, height: 220, numeric: false)
-                VStack(alignment: .leading, spacing: 9) {
-                    Text("PEAK").font(.system(size: 8, weight: .semibold)).tracking(1).foregroundStyle(Console.muted)
-                    MeterValue(feed: store.feed(receiver.serial), channel: tx.index - 1)
-                    Text("dBFS").font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
-                    Spacer()
-                    HStack(spacing: 5) { StatusDot(active: tx.connected); Text(tx.connected ? "TX LINK" : "TX OFFLINE").font(.system(size: 8, weight: .semibold)).foregroundStyle(tx.connected ? .green : Console.muted) }
-                }.frame(height: 214)
-            }.frame(maxWidth: .infinity, alignment: .center)
+            HStack(alignment: .top, spacing: 10) {
+                ProductionMeter(feed: store.feed(receiver.serial), channel: tx.index - 1, height: 220)
+                GainControl(tx: tx, receiver: receiver, store: store, height: 220)
+            }.frame(maxWidth: .infinity)
             Rectangle().fill(Console.line).frame(height: 1)
             HStack {
                 Text("BAT").font(.system(size: 9, weight: .semibold)).foregroundStyle(Console.muted)
@@ -262,12 +266,7 @@ struct MicrophoneStrip: View {
                     }.clipShape(Capsule())
                 }.frame(height: 3)
             }
-            Picker("ノイキャン TX \(tx.index)", selection: Binding(get: { tx.noise_mode }, set: {
-                store.send("noise", receiver: receiver, values: ["target": String(tx.index), "mode": $0])
-            })) {
-                Text("NC · NONE").tag("none"); Text("NC · BASIC").tag("basic"); Text("NC · STRONG").tag("strong")
-                if tx.noise_mode == "unknown" { Text("NC · —").tag("unknown") }
-            }.labelsHidden().controlSize(.small).disabled(!tx.connected || receiver.control_busy)
+            ProcessingControls(tx: tx, receiver: receiver, store: store)
             Text(tx.serial.isEmpty ? "CH \(tx.index) / 4" : tx.serial)
                 .font(.system(size: 8, design: .monospaced)).foregroundStyle(Console.muted).lineLimit(1).textSelection(.enabled)
         }
@@ -303,10 +302,10 @@ struct ReceiverCard: View {
                         .font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
                 }
                 Menu {
-                    Button("入力名を変更…") { draft = receiver.name; editing = true }
+                    Button("入力名を変更…") { draft = receiver.name; editing = true }.disabled(store.settingsLocked)
                     Button("機器の状態を更新") { store.send("refresh_controls", receiver: receiver) }.disabled(!receiver.connected || receiver.control_busy)
                     Divider()
-                    Button("登録を削除", role: .destructive) { store.send("delete", receiver: receiver) }.disabled(!receiver.can_delete)
+                    Button("登録を削除", role: .destructive) { store.send("delete", receiver: receiver) }.disabled(!receiver.can_delete || store.settingsLocked)
                 } label: { Image(systemName: "ellipsis").frame(width: 24, height: 24) }.menuStyle(.borderlessButton).fixedSize()
             }.padding(16)
             HStack(spacing: 1) {
@@ -317,6 +316,7 @@ struct ReceiverCard: View {
             HStack(spacing: 12) {
                 Text(receiver.connected ? "USB ONLINE" : "OFFLINE")
                     .font(.system(size: 9, weight: .semibold, design: .monospaced)).foregroundStyle(receiver.connected ? .green : Console.muted)
+                LosslessControl(receiver: receiver, store: store)
                 Text(Console.batteryBars(receiver.battery_code).map { "RX BAT \($0)/6\(receiver.charging ? " ⚡" : "")" } ?? "RX BAT —")
                     .font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
                 Spacer()
@@ -396,7 +396,8 @@ struct MainView: View {
     @State private var fps = 3
     @State private var outputMode = 3
     @State private var confirmTCOnly = false
-    @State private var recordingMode = "both"
+    @State private var showingAudio = false
+    @State private var showingTC = false
     private var connected: Int { store.snapshot.receivers.filter(\.connected).count }
     var body: some View {
         HStack(spacing: 0) {
@@ -408,10 +409,10 @@ struct MainView: View {
                     LazyVStack(alignment: .leading, spacing: 20) {
                         if !store.failure.isEmpty { errorBanner(store.failure) }
                         if !store.snapshot.error.isEmpty { errorBanner(store.snapshot.error) }
-                        if page == "routing" { MatrixView(store: store) }
+                        if page == "routing" { MatrixView(store: store).disabled(store.settingsLocked) }
                         else if page == "timeline" { RecordingTimeline(store: store) }
                         else if page == "overview" {
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 360), spacing: 14)], spacing: 14) {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 460), spacing: 14)], spacing: 14) {
                                 ForEach(store.snapshot.receivers) { ReceiverOverview(receiver: $0, store: store) }
                             }
                         }
@@ -435,6 +436,7 @@ struct MainView: View {
         .frame(minWidth: 1060, minHeight: 730)
         .background(Console.background).foregroundStyle(Color(white: 0.88))
         .tint(Color(white: 0.65)).preferredColorScheme(.dark)
+        .sheet(isPresented: $showingAudio) { BatchAudioPanel(store: store) }
         .alert("USB 音声を TC に切り替えます", isPresented: $confirmTCOnly) {
             Button("キャンセル", role: .cancel) { }
             Button("適用", action: applyTC)
@@ -489,11 +491,16 @@ struct MainView: View {
         }.buttonStyle(.plain)
     }
     private var header: some View {
-        HStack(spacing: 26) {
+        HStack(spacing: 18) {
             VStack(alignment: .leading, spacing: 5) {
                 Text(["overview": "一覧", "mixer": "受信・収録", "timeline": "タイムライン", "routing": "ルーティング"][page] ?? "").font(.system(size: 22, weight: .light))
             }
             Spacer()
+            SessionRecordStatus(store: store)
+            Button { store.settingsLocked.toggle() } label: {
+                Image(systemName: store.settingsLocked ? "lock.fill" : "lock.open").foregroundStyle(store.settingsLocked ? Console.cyan : Console.muted)
+            }.buttonStyle(ConsoleButton()).accessibilityLabel(store.settingsLocked ? "設定ロックを解除" : "設定をロック")
+            Button("一括設定") { showingAudio = true }.buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty || store.settingsLocked)
             Readout(title: "ONLINE", value: String(format: "%02d RX", connected))
             Readout(title: "SELECTED", value: String(format: "%02d RX", store.targets.count))
             Button { store.bulk("refresh_all") } label: { Image(systemName: "arrow.clockwise") }
@@ -502,41 +509,42 @@ struct MainView: View {
             .overlay(alignment: .bottom) { Rectangle().fill(Console.line).frame(height: 1) }
     }
     private var transport: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            HStack(spacing: 14) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("TIMECODE").font(.system(size: 10, weight: .bold)).tracking(1.5)
-                }.frame(width: 112, alignment: .leading)
-                Toggle(tcEnabled ? "TC ON" : "TC OFF", isOn: $tcEnabled).toggleStyle(.switch).controlSize(.mini).tint(Console.cyan).foregroundStyle(Console.cyan)
-                Picker("FPS", selection: $fps) { ForEach(0..<Console.fps.count, id: \.self) { Text(Console.fps[$0]).tag($0) } }.frame(width: 142)
-                Picker("出力", selection: $outputMode) { ForEach(0..<Console.outputs.count, id: \.self) { Text(["L-IN · TC入力", "L-OUT · USB全ch TC", "A-OUT · CH1 TC", "N/A · 音声4ch"][$0]).tag($0) } }.frame(width: 200)
-                Spacer(minLength: 0)
-                Button("TC を一括適用") {
-                    if tcEnabled && outputMode == 1 { confirmTCOnly = true } else { applyTC() }
-                }.buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty || store.targetsBusy)
-            }
-            Rectangle().fill(Console.line).frame(height: 1)
-            HStack(spacing: 14) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("REC TRANSPORT").font(.system(size: 10, weight: .bold)).tracking(1.2)
-                }.frame(width: 112, alignment: .leading)
-                Picker("収録先", selection: $recordingMode) {
-                    Text("Mac").tag("mac"); Text("本体").tag("device"); Text("両方").tag("both")
-                }.pickerStyle(.segmented).frame(width: 210)
-                Spacer()
-                Button { recording(start: true) } label: { Label("一括収録開始", systemImage: "record.circle") }
-                    .buttonStyle(ConsoleButton(active: true, color: Color(red: 0.85, green: 0.24, blue: 0.29))).disabled(store.targets.isEmpty || (recordingMode != "mac" && store.targetsBusy))
-                Button { recording(start: false) } label: { Label("停止", systemImage: "stop.fill") }
-                    .buttonStyle(ConsoleButton(color: Color(white: 0.75))).disabled(store.targets.isEmpty)
-            }
-        }.padding(18).background(Console.panel).overlay(alignment: .bottom) { Rectangle().fill(Console.line).frame(height: 1) }
+        HStack(spacing: 14) {
+            Button {
+                if let tc = store.targets.first?.tc, tc.known { tcEnabled = tc.enabled; fps = tc.fps; outputMode = tc.output }
+                showingTC = true
+            } label: { Label("TC", systemImage: "clock") }
+                .buttonStyle(ConsoleButton()).popover(isPresented: $showingTC) { tcPanel }
+            Rectangle().fill(Console.line).frame(width: 1, height: 22)
+            Picker("収録先", selection: $store.recordingMode) {
+                Text("Mac").tag("mac"); Text("本体").tag("device"); Text("両方").tag("both")
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 190)
+            Spacer()
+            Button { recording(start: true) } label: { Label("一括収録開始", systemImage: "record.circle") }
+                .buttonStyle(ConsoleButton(active: true, color: .red)).disabled(store.targets.isEmpty || (store.recordingMode != "mac" && store.targetsBusy))
+            Button { recording(start: false) } label: { Label("停止", systemImage: "stop.fill") }
+                .buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty)
+        }.padding(.horizontal, 24).padding(.vertical, 12).background(Console.panel)
+            .overlay(alignment: .bottom) { Rectangle().fill(Console.line).frame(height: 1) }
+    }
+    private var tcPanel: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("TIMECODE").font(.system(size: 16, weight: .medium))
+            Toggle(tcEnabled ? "TC ON" : "TC OFF", isOn: $tcEnabled).toggleStyle(.switch).tint(Console.cyan).foregroundStyle(Console.cyan)
+            Picker("FPS", selection: $fps) { ForEach(0..<Console.fps.count, id: \.self) { Text(Console.fps[$0]).tag($0) } }
+            Picker("出力", selection: $outputMode) { ForEach(0..<Console.outputs.count, id: \.self) { Text(["L-IN · TC入力", "L-OUT · USB全ch TC", "A-OUT · CH1 TC", "N/A · 音声4ch"][$0]).tag($0) } }
+            HStack { Spacer(); Button("選択RXへ適用") {
+                showingTC = false
+                if tcEnabled && outputMode == 1 { confirmTCOnly = true } else { applyTC() }
+            }.buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty || store.targetsBusy || store.settingsLocked) }
+        }.padding(24).frame(width: 350).disabled(store.settingsLocked)
     }
     private func applyTC() {
         store.bulk("tc_all", values: ["enabled": tcEnabled ? "1" : "0", "fps": String(fps), "output": String(outputMode)])
     }
     private func recording(start: Bool) {
-        if recordingMode != "device" { store.bulk(start ? "record_all" : "stop_all", values: ["folder": store.folder.path]) }
-        if recordingMode != "mac" { store.bulk(start ? "device_record_all" : "device_stop_all") }
+        if store.recordingMode != "device" { store.bulk(start ? "record_all" : "stop_all", values: ["folder": store.folder.path]) }
+        if store.recordingMode != "mac" { store.bulk(start ? "device_record_all" : "device_stop_all") }
     }
     private var footer: some View {
         HStack(spacing: 10) {
