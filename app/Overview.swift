@@ -99,6 +99,20 @@ struct CompactChannel: View {
                 ProductionMeter(feed: store.feed(receiver.serial), channel: tx.index - 1, height: meterHeight)
                 GainControl(tx: tx, receiver: receiver, store: store, height: meterHeight, compact: compact)
             }
+            Toggle(isOn: Binding(get: { tx.settings?["mute"] == 1 }, set: { muted in
+                store.send("setting", receiver: receiver, values: ["target": String(tx.index), "tx_serial": tx.serial, "key": "mute", "value": muted ? "1" : "0"])
+            })) {
+                HStack(spacing: 4) {
+                    Image(systemName: tx.settings?["mute"] == 1 ? "mic.slash.fill" : "mic.fill")
+                    Text("MUTE")
+                    Text(tx.settings?["mute"].map { $0 == 1 ? "ON" : "OFF" } ?? "—").foregroundStyle(Console.cyan)
+                }.frame(maxWidth: .infinity, minHeight: compact ? 24 : 28)
+            }.toggleStyle(.button).buttonStyle(.plain)
+                .foregroundStyle(tx.settings?["mute"] == 1 ? Console.cyan : Console.muted)
+                .background(tx.settings?["mute"] == 1 ? Console.cyan.opacity(0.1) : Color.black.opacity(0.12), in: RoundedRectangle(cornerRadius: 3))
+                .disabled(!tx.connected || tx.serial.isEmpty || tx.settings?["mute"] == nil || store.settingsLocked)
+                .accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) ミュート")
+                .help("送信機のミュート")
             Button {
                 store.send("device_record_tx", receiver: receiver, values: ["target": String(tx.index), "tx_serial": tx.serial, "value": tx.device_recording ? "0" : "1"])
             } label: {
