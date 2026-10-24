@@ -54,9 +54,9 @@ struct DeviceInspector: View {
                             Button { action(option.0) } label: {
                                 Text(option.1).font(.system(size: 10, weight: .medium, design: .monospaced))
                                     .foregroundStyle(value == option.0 ? Console.cyan : Console.muted)
-                                    .frame(maxWidth: .infinity, minHeight: 23)
+                                    .frame(maxWidth: .infinity, minHeight: 23).contentShape(Rectangle())
                                     .background(value == option.0 ? Color(white: 0.19) : Color.clear, in: RoundedRectangle(cornerRadius: 2))
-                            }.buttonStyle(.plain).accessibilityLabel("\(title) \(option.1)")
+                            }.buttonStyle(ConsoleCompactButton(active: value == option.0, color: Console.cyan, height: 23, padding: 0)).accessibilityLabel("\(title) \(option.1)")
                         }
                     }.padding(2).background(Color.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 3))
                         .overlay(alignment: .leading) { if value == -1 { Text("混在").font(.system(size: 8)).foregroundStyle(Console.muted).offset(x: -30) } }
@@ -80,7 +80,7 @@ struct DeviceInspector: View {
             HStack {
                 Text("INSPECTOR").font(.system(size: 10, weight: .semibold)).tracking(1).foregroundStyle(Console.muted)
                 Spacer()
-                Button { store.inspectorVisible = false } label: { Image(systemName: "sidebar.right") }.buttonStyle(.plain).accessibilityLabel("インスペクターを閉じる")
+                Button { store.inspectorVisible = false } label: { Image(systemName: "sidebar.right") }.buttonStyle(ConsoleCompactButton(minWidth: 24)).accessibilityLabel("インスペクターを閉じる")
             }.padding(14).frame(height: 44)
             Divider()
             HStack(spacing: 8) {

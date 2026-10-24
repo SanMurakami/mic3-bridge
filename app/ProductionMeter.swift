@@ -32,7 +32,7 @@ struct ProductionMeter: View {
                 Text("CLIP").font(.system(size: 7, weight: .bold, design: .monospaced)).tracking(0.7)
                     .foregroundStyle(meter.clipped ? Color.black : Console.muted.opacity(0.5))
                     .frame(width: 29, height: 12).background(meter.clipped ? red : Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 2))
-            }.buttonStyle(.plain)
+            }.buttonStyle(ConsoleCompactButton(height: 16, padding: 0))
             HStack(spacing: 4) {
                 MeterScale().equatable().frame(width: 23)
                 GeometryReader { p in

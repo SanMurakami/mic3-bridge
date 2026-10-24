@@ -17,7 +17,7 @@ struct ReceiverOverview: View {
                 StatusDot(active: receiver.connected)
                 Button { store.selectControl(ControlSelection(receiver: receiver.serial)) } label: {
                     Text(receiver.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                }.buttonStyle(.plain).accessibilityLabel("RX \(receiver.serial.suffix(6)) を選択")
+                }.buttonStyle(ConsoleCompactButton(active: store.controlSelection.contains(ControlSelection(receiver: receiver.serial)))).accessibilityLabel("RX \(receiver.serial.suffix(6)) を選択")
                 Spacer()
                 ProgressView().controlSize(.mini).opacity(receiver.control_busy ? 1 : 0).frame(width: 12)
                 Text(receiver.tc.enabled && receiver.tc.known ? (receiver.tc.output == 1 ? "USB TC×4" : "TC ON") : "TC OFF")
@@ -33,7 +33,7 @@ struct ReceiverOverview: View {
                     Text("RX \(receiver.serial)")
                     Text("FW \(receiver.firmware)")
                     Button("登録を削除", role: .destructive) { store.send("delete", receiver: receiver) }.disabled(!receiver.can_delete || store.settingsLocked)
-                } label: { Image(systemName: "ellipsis").frame(width: 16, height: 20) }.menuStyle(.borderlessButton).fixedSize()
+                } label: { Image(systemName: "ellipsis").frame(width: 24, height: 26).contentShape(Rectangle()) }.menuStyle(.borderlessButton).fixedSize()
 
             }.font(.system(size: 9, weight: .semibold, design: .monospaced)).padding(.horizontal, 12).frame(height: 44)
             HStack { LosslessControl(receiver: receiver, store: store); Spacer(); BatteryIndicator(code: receiver.battery_code, connected: receiver.connected, charging: receiver.charging).accessibilityLabel("レシーバー電池") }.padding(.horizontal, 12).padding(.bottom, 10)
@@ -88,11 +88,11 @@ struct CompactChannel: View {
                         .foregroundStyle(tx.connected ? Color(white: 0.9) : Console.muted)
                     Spacer(); StatusDot(active: tx.connected)
                 }.frame(maxWidth: .infinity, minHeight: 22).contentShape(Rectangle())
-            }.buttonStyle(.plain).disabled(tx.serial.isEmpty).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) を選択").help("⌘クリックで複数選択")
+            }.buttonStyle(ConsoleCompactButton(active: !tx.serial.isEmpty && store.controlSelection.contains(ControlSelection(receiver: receiver.serial, transmitter: tx.serial)), color: Console.cyan, height: 22, padding: 3)).disabled(tx.serial.isEmpty).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) を選択").help("⌘クリックで複数選択")
             Button { editing = true } label: {
                 Text(tx.label.isEmpty ? "—" : tx.label).font(.system(size: compact ? 11 : 13, weight: .semibold))
                     .lineLimit(1).frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
-            }.buttonStyle(.plain).help("人物ラベル・マイクの引き継ぎ").popover(isPresented: $editing) {
+            }.buttonStyle(ConsoleCompactButton()).help("人物ラベル・マイクの引き継ぎ").popover(isPresented: $editing) {
                 LabelEditor(tx: tx, receiver: receiver, store: store)
             }
             HStack(alignment: .top, spacing: 1) {
@@ -106,10 +106,9 @@ struct CompactChannel: View {
                     Image(systemName: tx.settings?["mute"] == 1 ? "mic.slash.fill" : "mic.fill")
                     Text("MUTE")
                     Text(tx.settings?["mute"].map { $0 == 1 ? "ON" : "OFF" } ?? "—").foregroundStyle(Console.cyan)
-                }.frame(maxWidth: .infinity, minHeight: compact ? 24 : 28)
-            }.toggleStyle(.button).buttonStyle(.plain)
+                }.frame(maxWidth: .infinity, minHeight: compact ? 24 : 28).contentShape(Rectangle())
+            }.toggleStyle(.button).buttonStyle(ConsoleCompactButton(active: tx.settings?["mute"] == 1, color: Console.cyan, padding: 0))
                 .foregroundStyle(tx.settings?["mute"] == 1 ? Console.cyan : Console.muted)
-                .background(tx.settings?["mute"] == 1 ? Console.cyan.opacity(0.1) : Color.black.opacity(0.12), in: RoundedRectangle(cornerRadius: 3))
                 .disabled(!tx.connected || tx.serial.isEmpty || tx.settings?["mute"] == nil || store.settingsLocked)
                 .accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) ミュート")
                 .help("送信機のミュート")
@@ -119,9 +118,8 @@ struct CompactChannel: View {
                 HStack(spacing: 4) {
                     Image(systemName: tx.connected && tx.device_recording ? "stop.fill" : "record.circle")
                     Text(!tx.connected ? "OFFLINE" : "REC")
-                }.frame(maxWidth: .infinity, minHeight: compact ? 24 : 28)
-            }.buttonStyle(.plain).foregroundStyle(tx.connected ? Color.red : Console.muted)
-                .background(tx.connected && tx.device_recording ? Color.red.opacity(0.1) : Color.clear).clipShape(RoundedRectangle(cornerRadius: 3))
+                }.frame(maxWidth: .infinity, minHeight: compact ? 24 : 28).contentShape(Rectangle())
+            }.buttonStyle(ConsoleCompactButton(active: tx.connected && tx.device_recording, color: .red, padding: 0)).foregroundStyle(tx.connected ? Color.red : Console.muted)
                 .disabled(!tx.connected || tx.serial.isEmpty)
                 .accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) 本体録音\(tx.device_recording ? "停止" : "開始")")
             BatteryIndicator(code: tx.battery_code, connected: tx.connected, charging: tx.charging)
@@ -131,7 +129,7 @@ struct CompactChannel: View {
                 ProcessingControls(tx: tx, receiver: receiver, store: store)
             } else {
                 Button { processing = true } label: { Label("処理", systemImage: "slider.horizontal.3").frame(maxWidth: .infinity, minHeight: 22) }
-                    .buttonStyle(.plain).foregroundStyle(Console.muted).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) 処理設定").popover(isPresented: $processing) {
+                    .buttonStyle(ConsoleCompactButton()).foregroundStyle(Console.muted).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) 処理設定").popover(isPresented: $processing) {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("CH \(tx.index) · \(tx.label.isEmpty ? String(receiver.serial.suffix(6)) : tx.label)").font(.headline)
                             ProcessingControls(tx: tx, receiver: receiver, store: store)

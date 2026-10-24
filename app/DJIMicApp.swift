@@ -183,15 +183,14 @@ enum Console {
 struct ConsoleButton: ButtonStyle {
     var active = false
     var color = Color(white: 0.74)
-    @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.font(.system(size: 11, weight: .semibold)).padding(.horizontal, 12).padding(.vertical, 9)
+            .contentShape(Rectangle())
             .foregroundStyle(active ? Color.black : color)
-            .background(active ? color : color.opacity(configuration.isPressed ? 0.22 : 0.08), in: RoundedRectangle(cornerRadius: 4))
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(color.opacity(0.3)))
-            .opacity(!enabled ? 0.35 : configuration.isPressed ? 0.8 : 1)
+            .modifier(ConsoleButtonFace(active: active, color: color, pressed: configuration.isPressed, solid: true))
     }
 }
+
 struct StatusDot: View {
     var active: Bool
     var color = Color.green
@@ -296,7 +295,7 @@ struct MainView: View {
                 .foregroundStyle(page == id ? Color.white : Console.muted)
                 .background(page == id ? Color.white.opacity(0.06) : .clear)
                 .overlay(alignment: .bottom) { if page == id { Rectangle().fill(Console.cyan).frame(height: 2) } }
-        }.buttonStyle(.plain).keyboardShortcut(key, modifiers: .command)
+        }.buttonStyle(ConsoleCompactButton(active: page == id, height: 42, padding: 0)).keyboardShortcut(key, modifiers: .command)
     }
     private var header: some View {
         HStack(spacing: 0) {
@@ -383,7 +382,7 @@ struct MainView: View {
             StatusDot(active: store.running)
             Text(store.running ? "ENGINE ONLINE" : "ENGINE OFFLINE").font(.system(size: 9, design: .monospaced)).foregroundStyle(store.running ? .green : Console.muted)
             Rectangle().fill(Console.line).frame(width: 1, height: 12)
-            Button("録音先…") { store.chooseFolder() }.buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(Color(white: 0.78))
+            Button("録音先…") { store.chooseFolder() }.buttonStyle(ConsoleCompactButton()).font(.system(size: 10)).foregroundStyle(Color(white: 0.78))
             Text(store.folder.path).font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted).lineLimit(1).truncationMode(.middle)
             Spacer()
             if !store.running { Button("再開") { Task { await store.start() } }.buttonStyle(ConsoleButton()) }

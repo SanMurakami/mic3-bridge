@@ -46,7 +46,7 @@ struct GainControl: View {
                 Button { set(gain - 1) } label: { Image(systemName: "minus").frame(width: compact ? 7 : 9, height: 16) }.disabled(!enabled || gain <= -12).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) ゲインを1dB下げる")
                 Text((-12...12).contains(gain) ? String(format: "%+d", gain) : "—").monospacedDigit().frame(width: compact ? 17 : 21)
                 Button { set(gain + 1) } label: { Image(systemName: "plus").frame(width: compact ? 7 : 9, height: 16) }.disabled(!enabled || gain >= 12).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) ゲインを1dB上げる")
-            }.font(.system(size: compact ? 8 : 9, design: .monospaced)).buttonStyle(.plain)
+            }.font(.system(size: compact ? 8 : 9, design: .monospaced)).buttonStyle(ConsoleCompactButton(height: 22, minWidth: 18, padding: 1))
         }.opacity(tx.connected ? 1 : 0.45)
             .onChange(of: tx.gain_db) { _, value in if value == requested { requested = nil } }
             .onChange(of: receiver.control_busy) { _, busy in if !busy { requested = nil } }
