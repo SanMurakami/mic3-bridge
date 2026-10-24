@@ -4,6 +4,7 @@ import AppKit
 struct NativeGainFader: NSViewRepresentable {
     let value: Int
     let enabled: Bool
+    let label: String
     let action: (Int) -> Void
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSSlider {
@@ -11,19 +12,20 @@ struct NativeGainFader: NSViewRepresentable {
         slider.isVertical = true
         slider.isContinuous = false
         slider.numberOfTickMarks = 5; slider.allowsTickMarkValuesOnly = false
-        slider.setAccessibilityLabel("送信機入力ゲイン dB")
+        slider.setAccessibilityLabel(label)
         return slider
     }
     func updateNSView(_ slider: NSSlider, context: Context) {
         context.coordinator.parent = self
-        if !enabled || context.coordinator.lastRemote != value { slider.integerValue = value; context.coordinator.lastRemote = value }
-        slider.isEnabled = enabled
+        if !enabled || (context.coordinator.lastRemote != value && !(slider.cell?.isHighlighted ?? false)) { slider.integerValue = value; context.coordinator.lastRemote = value }
+        slider.isEnabled = enabled && context.environment.isEnabled
+        slider.setAccessibilityLabel(label)
     }
     final class Coordinator: NSObject {
         var parent: NativeGainFader
         var lastRemote: Int?
         init(_ parent: NativeGainFader) { self.parent = parent }
-        @objc func changed(_ sender: NSSlider) { let value = Int(sender.doubleValue.rounded()); sender.integerValue = value; parent.action(value) }
+        @objc func changed(_ sender: NSSlider) { guard parent.enabled else { sender.integerValue = parent.value; return }; let value = Int(sender.doubleValue.rounded()); sender.integerValue = value; parent.action(value) }
     }
 }
 struct GainControl: View {
@@ -31,22 +33,28 @@ struct GainControl: View {
     let receiver: Receiver
     @ObservedObject var store: MicStore
     var height = 190.0
-    private var gain: Int { tx.gain_db ?? -1000 }
-    private var enabled: Bool { tx.connected && !tx.serial.isEmpty && (-12...12).contains(gain) && tx.agc == 0 && !receiver.control_busy && !store.settingsLocked }
+    var compact = false
+    @State private var requested: Int?
+    private var gain: Int { requested ?? tx.gain_db ?? -1000 }
+    private var enabled: Bool { tx.connected && !tx.serial.isEmpty && (-12...12).contains(gain) && tx.agc == 0 && !store.settingsLocked }
     var body: some View {
         VStack(spacing: 6) {
             Text("GAIN").font(.system(size: 7, weight: .semibold)).tracking(1).foregroundStyle(Console.muted).frame(height: 12)
-            NativeGainFader(value: (-12...12).contains(gain) ? gain : 0, enabled: enabled, action: set)
-                .frame(width: 25, height: height)
+            NativeGainFader(value: (-12...12).contains(gain) ? gain : 0, enabled: enabled, label: "TX\(tx.index) / \(receiver.serial.suffix(6)) 入力ゲイン dB", action: set)
+                .frame(width: 25, height: height).disabled(!enabled)
             HStack(spacing: 2) {
-                Button { set(gain - 1) } label: { Image(systemName: "minus").frame(width: 9, height: 16) }.disabled(!enabled || gain <= -12)
-                Text((-12...12).contains(gain) ? String(format: "%+d", gain) : "—").monospacedDigit().frame(width: 21)
-                Button { set(gain + 1) } label: { Image(systemName: "plus").frame(width: 9, height: 16) }.disabled(!enabled || gain >= 12)
-            }.font(.system(size: 9, design: .monospaced)).buttonStyle(.plain)
+                Button { set(gain - 1) } label: { Image(systemName: "minus").frame(width: compact ? 7 : 9, height: 16) }.disabled(!enabled || gain <= -12).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) ゲインを1dB下げる")
+                Text((-12...12).contains(gain) ? String(format: "%+d", gain) : "—").monospacedDigit().frame(width: compact ? 17 : 21)
+                Button { set(gain + 1) } label: { Image(systemName: "plus").frame(width: compact ? 7 : 9, height: 16) }.disabled(!enabled || gain >= 12).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) ゲインを1dB上げる")
+            }.font(.system(size: compact ? 8 : 9, design: .monospaced)).buttonStyle(.plain)
         }.opacity(tx.connected ? 1 : 0.45)
+            .onChange(of: tx.gain_db) { _, value in if value == requested { requested = nil } }
+            .onChange(of: receiver.control_busy) { _, busy in if !busy { requested = nil } }
+            .onChange(of: tx.serial) { _, _ in requested = nil }
     }
     private func set(_ db: Int) {
         guard enabled, (-12...12).contains(db), db != gain else { return }
+        requested = db
         store.send("gain", receiver: receiver, values: ["target": String(tx.index), "tx_serial": tx.serial, "value": String(db)])
     }
 }
@@ -61,13 +69,13 @@ struct ProcessingControls: View {
             })) {
                 Text("AGC · OFF").tag(0); Text("AGC · AUTO").tag(1); Text("AGC · DYN").tag(2)
                 if (tx.agc ?? -1) < 0 { Text("AGC · —").tag(-1) }
-            }.disabled(!tx.connected || tx.serial.isEmpty || receiver.control_busy || store.settingsLocked)
+            }.disabled(!tx.connected || tx.serial.isEmpty || store.settingsLocked)
             Picker("ノイキャン TX\(tx.index)", selection: Binding(get: { tx.noise_mode }, set: {
                 store.send("noise", receiver: receiver, values: ["target": String(tx.index), "mode": $0])
             })) {
                 Text("NC · OFF").tag("none"); Text("NC · BASIC").tag("basic"); Text("NC · STRONG").tag("strong")
                 if tx.noise_mode == "unknown" { Text("NC · —").tag("unknown") }
-            }.disabled(!tx.connected || receiver.control_busy || store.settingsLocked)
+            }.disabled(!tx.connected || store.settingsLocked)
         }.labelsHidden().controlSize(.mini)
     }
 }
@@ -81,7 +89,7 @@ struct LosslessControl: View {
             Text("LOSSLESS \(receiver.lossless == 1 ? "ON" : receiver.lossless == 0 ? "OFF" : "—")")
                 .font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(Console.cyan)
         }.toggleStyle(.switch).controlSize(.mini).tint(Console.cyan)
-            .disabled(!receiver.connected || (receiver.lossless ?? -1) < 0 || receiver.control_busy || store.settingsLocked)
+            .disabled(!receiver.connected || (receiver.lossless ?? -1) < 0 || store.settingsLocked)
     }
 }
 struct BatchAudioPanel: View {

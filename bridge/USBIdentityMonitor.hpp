@@ -30,6 +30,7 @@ class USBIdentityMonitor {
     }
     void inspect(io_service_t service,uint64_t id) {@autoreleasepool{
         USBControlLock guard;if(!guard)return;
+        Identity cached;{std::lock_guard<std::mutex> lock(mutex);auto found=identities.find(id);if(found!=identities.end())cached=found->second;}
         NSError *error=nil;IOUSBHostInterface *interface=[[IOUSBHostInterface alloc] initWithIOService:service options:0 queue:nil error:&error interestHandler:nil];
         if(!interface)return;
         unsigned previous=interface.interfaceDescriptor?interface.interfaceDescriptor->bAlternateSetting:0;
@@ -38,13 +39,16 @@ class USBIdentityMonitor {
         TelemetryParser status;
         parser.onFrame=[&](const uint8_t *p,size_t n){auto old=status.state.timecode;bool known=status.state.known;status.frame(p,n);if(status.state.known&&(!known||old!=status.state.timecode)){mach_timebase_info_data_t tb;mach_timebase_info(&tb);status.state.observedHostSeconds=mach_absolute_time()*(double)tb.numer/tb.denom/1e9;}};
         auto start=std::chrono::steady_clock::now();
-        while(pipe&&running&&(parser.identity.serial.empty()||std::chrono::steady_clock::now()-start<std::chrono::milliseconds(500))&&std::chrono::steady_clock::now()-start<std::chrono::seconds(2)){
+        while(pipe&&running&&std::chrono::steady_clock::now()-start<std::chrono::seconds(2)){
             NSMutableData *data=[NSMutableData dataWithLength:2048];NSUInteger count=0;error=nil;
-            BOOL ok=[pipe sendIORequestWithData:data bytesTransferred:&count completionTimeout:.2 error:&error];
+            BOOL ok=[pipe sendIORequestWithData:data bytesTransferred:&count completionTimeout:.08 error:&error];
             if(count)parser.append((const uint8_t*)data.bytes,count);
+            if(completeTelemetry(status.state)&&(!cached.serial.empty()||!parser.identity.serial.empty())&&std::chrono::steady_clock::now()-start>=std::chrono::milliseconds(160))break;
             if(!ok&&error.code!=(NSInteger)kIOReturnTimeout)break;
         }
         if(previous!=1)[interface selectAlternateSetting:previous error:nil];[interface destroy];
+        if(parser.identity.serial.empty())parser.identity=cached;
+        else if(parser.identity.serial==cached.serial&&parser.identity.firmware.empty())parser.identity.firmware=cached.firmware;
         if(!parser.identity.serial.empty()){std::lock_guard<std::mutex> lock(mutex);identities[id]=parser.identity;if(status.state.known){telemetry[id]=status.state;updated[id]=std::chrono::steady_clock::now();}refreshIDs.erase(id);}
     }}
     void loop(){while(running){@autoreleasepool{
@@ -73,7 +77,7 @@ public:
     ~USBIdentityMonitor(){running=false;worker.join();}
     void observed(const std::string& serial,unsigned index,const std::string& mode){std::lock_guard<std::mutex> lock(mutex);for(auto& [id,identity]:identities)if(identity.serial==serial&&telemetry[id].transmitters.count(index))telemetry[id].transmitters[index].noise=mode;}
     void refresh(const std::string& serial){std::lock_guard<std::mutex> lock(mutex);for(auto& [id,identity]:identities)if(identity.serial==serial)refreshIDs.insert(id);}
-    void update(const std::string& serial,const Telemetry& state){std::lock_guard<std::mutex> lock(mutex);for(auto& [id,identity]:identities)if(identity.serial==serial){telemetry[id]=state;updated[id]=std::chrono::steady_clock::now();}}
+    void update(const std::string& serial,const Telemetry& state){std::lock_guard<std::mutex> lock(mutex);for(auto& [id,identity]:identities)if(identity.serial==serial){telemetry[id]=state;updated[id]=std::chrono::steady_clock::now();refreshIDs.erase(id);}}
     Telemetry status(const std::string& serial){std::lock_guard<std::mutex> lock(mutex);for(auto& [id,identity]:identities)if(identity.serial==serial&&updated.count(id)&&std::chrono::steady_clock::now()-updated[id]<std::chrono::seconds(12))return telemetry[id];return {};}
     std::map<unsigned,std::string> controls(const std::string& serial){std::map<unsigned,std::string> result;for(auto& [index,tx]:status(serial).transmitters)result[index]=tx.noise;return result;}
     Identity get(uint64_t id){std::lock_guard<std::mutex> lock(mutex);auto found=identities.find(id);return found==identities.end()?Identity{}:found->second;}

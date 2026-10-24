@@ -25,6 +25,32 @@ int main(){
   std::vector<uint8_t> payload={3,38,0,3,0,0,0,0,32};payload.insert(payload.end(),data.begin(),data.end());auto packet=frame(payload);
   dji::TelemetryParser state;state.frame(packet.data(),packet.size());assert(state.state.lossless==lossless&&state.state.gain==-1);
  }
+ // 送信機IDは連番ではなくone-hot: CH3=4、CH4=8。接続maskで消し込み、断片の欠落をOFFLINEへ誤変換しない。
+ for(unsigned ch=1;ch<=4;ch++){
+  unsigned wire=1u<<(ch-1);assert(dji::txWireTarget(ch)==wire&&dji::txChannel(wire)==ch);
+  std::vector<uint8_t> status(26);status[7]=3;
+  std::vector<uint8_t> first={3,32,0,2,uint8_t(wire),0,0,0,26};first.insert(first.end(),status.begin(),status.end());auto packet=frame(first);
+  dji::TelemetryParser parser;parser.frame(packet.data(),packet.size());assert(parser.state.transmitters.count(ch));
+  std::vector<uint8_t> rxStatus(32);rxStatus[24]=wire;
+  std::vector<uint8_t> payload={3,38,0,3,0,0,0,0,32};payload.insert(payload.end(),rxStatus.begin(),rxStatus.end());packet=frame(payload);parser.frame(packet.data(),packet.size());
+  assert(parser.state.connectedMask==int(wire)&&parser.state.transmitters.size()==1&&parser.state.transmitters.at(ch).gain==3);
+  payload[9+24]=0;packet=frame(payload);parser.frame(packet.data(),packet.size());assert(parser.state.transmitters.empty());
+  payload[9+24]=wire;packet=frame(payload);parser.frame(packet.data(),packet.size());
+  assert(parser.state.transmitters.size()==1&&parser.state.transmitters.at(ch).gain==-1000&&!dji::completeTelemetry(parser.state));
+ }
+ assert(dji::txChannel(3)==0&&dji::txChannel(0)==0&&dji::txChannel(16)==0);
+ // wire4のTXはUSB CH3に対応し、RX接続maskが4となるpacketを検証。
+ {
+  auto txValue=bytes("b0248471007850003d023c02d0001a0a19031729070300030000");
+  auto rxValue=bytes("c839000f00000000d0001a0a19031729070300030f0000000400000000000000");
+  auto identity=bytes("010b00025445535430303030303030303037");
+  std::vector<uint8_t> payload={3,0,0,2,4,0,0,0,uint8_t(txValue.size())};payload.insert(payload.end(),txValue.begin(),txValue.end());
+  payload.insert(payload.end(),{1,4,0,0,0,uint8_t(identity.size())});payload.insert(payload.end(),identity.begin(),identity.end());
+  payload.insert(payload.end(),{3,0,0,0,0,uint8_t(rxValue.size())});payload.insert(payload.end(),rxValue.begin(),rxValue.end());payload[1]=payload.size()-3;
+  auto packet=frame(payload);dji::TelemetryParser parser;parser.frame(packet.data(),packet.size());
+  assert(dji::completeTelemetry(parser.state)&&parser.state.connectedMask==4&&parser.state.transmitters.size()==1);
+  auto t=parser.state.transmitters.at(3);assert(t.serial=="TEST0000000007"&&t.recording&&t.gain==0&&t.agc==1&&t.noise=="none");assert(!parser.state.transmitters.count(4));
+ }
  // 途切れた record、破損した CRC を事実として反映しない。
  p.back()=0;p.pop_back();p[1]--;auto truncated=frame(p);dji::TelemetryParser t;t.frame(truncated.data(),truncated.size());assert(!t.state.known);
  f.back()^=1;dji::IdentityParser parser;parser.onFrame=[&](auto data,auto n){t.frame(data,n);};parser.append(f.data(),f.size());assert(!t.state.known);

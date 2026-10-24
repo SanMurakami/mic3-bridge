@@ -25,3 +25,6 @@ clang++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
 "$repo_dir/.build/waveform-test"
 swiftc -O -warnings-as-errors "$repo_dir/app/TimelineData.swift" "$repo_dir/app/MeterState.swift" "$repo_dir/app/Snapshot.swift" "$repo_dir/tests/timeline-test.swift" -o "$repo_dir/.build/timeline-test"
 "$repo_dir/.build/timeline-test"
+clang++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
+    "$repo_dir/tests/control-queue-test.cpp" -o "$repo_dir/.build/control-queue-test"
+"$repo_dir/.build/control-queue-test"

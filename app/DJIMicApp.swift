@@ -320,8 +320,7 @@ struct ReceiverCard: View {
                 Text(Console.batteryBars(receiver.battery_code).map { "RX BAT \($0)/6\(receiver.charging ? " ⚡" : "")" } ?? "RX BAT —")
                     .font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
                 Spacer()
-                if receiver.control_busy { ProgressView().controlSize(.mini); Text("機器に適用中").font(.caption).foregroundStyle(Color(white: 0.78)) }
-                else if !receiver.control_message.isEmpty { Text(receiver.control_message).font(.system(size: 9)).foregroundStyle(Console.muted) }
+                ProgressView().controlSize(.mini).opacity(receiver.control_busy ? 1 : 0).frame(width: 12)
                 if receiver.recording || receiver.recorded_seconds > 0 {
                     RecordingCounter(feed: store.feed(receiver.serial), recording: receiver.recording)
                 }
@@ -412,7 +411,7 @@ struct MainView: View {
                         if page == "routing" { MatrixView(store: store).disabled(store.settingsLocked) }
                         else if page == "timeline" { RecordingTimeline(store: store) }
                         else if page == "overview" {
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 460), spacing: 14)], spacing: 14) {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 400), spacing: 14)], spacing: 14) {
                                 ForEach(store.snapshot.receivers) { ReceiverOverview(receiver: $0, store: store) }
                             }
                         }

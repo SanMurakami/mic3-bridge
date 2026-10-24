@@ -17,6 +17,7 @@
 #include "USBIdentityMonitor.hpp"
 #include "Recorder.hpp"
 #include "Waveform.hpp"
+#include "ControlQueue.hpp"
 #include <fcntl.h>
 #include <cmath>
 #include "../driver/Protocol.h"
@@ -196,7 +197,16 @@ class Manager {
             NSString *message=[result isKindOfClass:[NSDictionary class]]&&[result[@"message"] isKindOfClass:[NSString class]]?result[@"message"]:@"機器の応答を確認できませんでした。";
             r->second.controlMessage=message.UTF8String;if(!ok)r->second.error=message.UTF8String;
             if([result isKindOfClass:NSDictionary.class])recordControlChange(r->second,job.task.arguments,result);
-            identities.refresh(job.serial);}
+            NSDictionary *status=[result isKindOfClass:NSDictionary.class]?result[@"status"]:nil;
+            if([status isKindOfClass:NSDictionary.class]&&[status[@"known"] boolValue]){
+                dji::Telemetry state;state.known=true;state.connectedMask=[status[@"connected_mask"] intValue];state.observedHostSeconds=[status[@"observed_host_seconds"] doubleValue];state.lossless=[status[@"lossless"] intValue];state.gain=[status[@"gain_db"] intValue];
+                state.tcEnabled=[status[@"tc_enabled"] boolValue];state.fps=[status[@"fps"] intValue];state.output=[status[@"output"] intValue];state.timecode=[status[@"timecode"] UTF8String]?:"";
+                state.battery=[status[@"battery_code"] intValue];state.charging=[status[@"charging"] boolValue];state.allRecording=[status[@"all_recording"] boolValue];
+                for(NSDictionary *t in status[@"transmitters"]){dji::TransmitterState tx;tx.index=[t[@"index"] unsignedIntValue];if(tx.index<1||tx.index>4)continue;
+                    tx.serial=[t[@"serial"] UTF8String]?:"";tx.noise=[t[@"noise_mode"] UTF8String]?:"unknown";tx.gain=[t[@"gain_db"] intValue];tx.agc=[t[@"agc"] intValue];tx.agcMode=[t[@"agc_mode_raw"] intValue];tx.agcEnabled=[t[@"agc_enabled"] intValue];
+                    tx.battery=[t[@"battery_code"] intValue];tx.charging=[t[@"charging"] boolValue];tx.recording=[t[@"recording"] boolValue];tx.total=[t[@"total"] intValue];tx.remaining=[t[@"remaining"] intValue];state.transmitters[tx.index]=tx;}
+                identities.update(job.serial,state);
+            }else identities.refresh(job.serial);}
         controlJobs.erase(controlJobs.begin());
         if(r!=receivers.end())r->second.controlBusy=std::any_of(controlJobs.begin(),controlJobs.end(),[&](auto& pending){return pending.serial==r->first;});
     }
@@ -214,7 +224,16 @@ class Manager {
         NSData *data=[NSJSONSerialization dataWithJSONObject:raw options:NSJSONWritingPrettyPrinted error:&error];
         if(!data||![data writeToFile:path options:NSDataWritingAtomic error:&error])r.error="録音は継続中ですが、設定変更履歴を保存できませんでした。";
     }
-    void enqueue(Receiver& r,NSArray *arguments,bool priorityStop=false){if(!r.location||(r.controlBusy&&!priorityStop))throw std::runtime_error("接続を確認するか、前の機器操作の完了を待ってください。");
+    void enqueue(Receiver& r,NSArray *arguments,bool priorityStop=false){if(!r.location)throw std::runtime_error("レシーバーが未接続です。");
+        uint64_t registry=RegistryIDs[r.location];
+        if(!registry||identities.get(registry).serial!=r.serial)throw std::runtime_error("レシーバーの識別情報を更新してください。");
+        arguments=[arguments arrayByAddingObjectsFromArray:@[@"--registry-id",[NSString stringWithFormat:@"%llu",(unsigned long long)registry]]];
+        NSString *op=arguments.firstObject;NSUInteger keyLength=([op isEqual:@"--gain"]||[op isEqual:@"--agc"])?4:[op isEqual:@"--set"]?3:([op isEqual:@"--lossless"]||[op isEqual:@"--tc"])?2:0;
+        // 実行前の連続した同じ操作は最新値へ集約。他の設定をまたいで順序を変えない。
+        if(keyLength&&arguments.count>=keyLength){auto key=[arguments subarrayWithRange:NSMakeRange(0,keyLength)];
+            auto index=dji::pendingReplacement(controlJobs,r.serial,[&](auto& job){NSArray *old=job.task.arguments;return old.count>=keyLength&&[[old subarrayWithRange:NSMakeRange(0,keyLength)] isEqual:key];});
+            if(index<controlJobs.size()){controlJobs[index].task.arguments=arguments;return;}}
+        if(!priorityStop&&(controlJobs.size()>=64||std::count_if(controlJobs.begin(),controlJobs.end(),[&](auto& job){return job.serial==r.serial;})>=16))throw std::runtime_error("機器への操作が混み合っています。");
         NSTask *task=[NSTask new];NSPipe *output=[NSPipe pipe];task.standardOutput=output;task.standardError=[NSFileHandle fileHandleWithNullDevice];
         task.executableURL=[NSURL fileURLWithPath:[[[NSBundle mainBundle].executablePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"dji-mic-control"]];task.arguments=arguments;
         r.controlBusy=true;r.controlMessage=priorityStop?"停止待ち":"適用待ち";
@@ -227,6 +246,7 @@ class Manager {
         return [mapping isKindOfClass:[NSString class]]&&dji::validSerial(mapping.UTF8String)?std::string(mapping.UTF8String):slot;}
     void rememberTransmitters(const Receiver& r,const dji::Telemetry& state){bool changed=false;
         for(auto& [index,tx]:state.transmitters){if(tx.serial.empty())continue;auto slot=r.serial+":TX"+std::to_string(index);NSString *key=ns("@slot:"+slot);
+            for(NSString *old in [labels.allKeys copy])if([old hasPrefix:ns("@slot:"+r.serial+":TX")]&&![old isEqual:key]&&[labels[old] isEqual:ns(tx.serial)]){[labels removeObjectForKey:old];changed=true;}
             if(![labels[key] isEqual:ns(tx.serial)]){labels[key]=ns(tx.serial);if(!labels[ns(tx.serial)]&&labels[ns(slot)])labels[ns(tx.serial)]=labels[ns(slot)];changed=true;}}
         if(changed)try{saveLabels();}catch(const std::exception& e){commandError=e.what();}}
 
