@@ -8,6 +8,8 @@ struct Transmitter: Decodable, Identifiable, Equatable {
     let battery_code, storage_total, storage_remaining: Int
     var gain_db: Int? = nil
     var agc: Int? = nil
+    var eq: Int? = nil
+    var low_cut: Int? = nil
 }
 struct TimecodeState: Decodable, Equatable {
     let known, enabled: Bool

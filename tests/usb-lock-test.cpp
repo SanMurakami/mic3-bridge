@@ -5,7 +5,7 @@
 int main(){
  using namespace std::chrono;
  std::atomic<bool> reading{false},release{false},waiting{false},writerDone{false};
- std::thread reader([&]{dji::USBControlLock first(0,true);assert(first);{dji::USBControlLock second(0,true);assert(second);}reading=true;while(!release)std::this_thread::yield();});
+ std::thread reader([&]{dji::USBControlLock first(0,true);assert(first);{dji::USBControlLock second(0,true);assert(second);}reading=true;while(!release)std::this_thread::yield();assert(first.writerWaiting());});
  while(!reading)std::this_thread::yield();
  std::thread writer([&]{waiting=true;dji::USBControlLock guard(1000);assert(guard);dji::USBControlLock blocked(0,true);assert(!blocked);writerDone=true;});
  while(!waiting)std::this_thread::yield();

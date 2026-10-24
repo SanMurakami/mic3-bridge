@@ -29,6 +29,8 @@ class USBIdentityMonitor {
         ~Reader(){alive=false;worker.join();IOObjectRelease(service);}
         void run(){@autoreleasepool{
             IOUSBHostInterface *iface=nil;IOUSBHostPipe *pipe=nil;unsigned previous=0;
+            std::unique_ptr<USBControlLock> lease;
+            auto closeInterface=[&]{if(iface){if(previous!=1)[iface selectAlternateSetting:previous error:nil];[iface destroy];iface=nil;pipe=nil;}lease.reset();};
             IdentityParser parser;TelemetryParser state;Identity identity;uint64_t generation=0;bool resumed=true,warm=false;
             parser.onFrame=[&](const uint8_t *p,size_t n){
                 if(!parser.identity.serial.empty())identity=parser.identity;
@@ -42,14 +44,16 @@ class USBIdentityMonitor {
             };
             while(alive&&owner.running){@autoreleasepool{
                 bool retry=false;
-                {USBControlLock guard(0,true);
-                    if(!guard){resumed=true;retry=true;}
+                {
+                    if(lease&&lease->writerWaiting()){closeInterface();resumed=true;warm=false;}
+                    if(!lease){auto candidate=std::make_unique<USBControlLock>(0,true);if(*candidate)lease=std::move(candidate);}
+                    if(!lease){resumed=true;retry=true;}
                     else {
                         if(!iface){NSError *error=nil;iface=[[IOUSBHostInterface alloc]initWithIOService:service options:0 queue:nil error:&error interestHandler:nil];
                             if(iface){previous=iface.interfaceDescriptor?iface.interfaceDescriptor->bAlternateSetting:0;
                                 if(previous!=1&&![iface selectAlternateSetting:1 error:&error]){[iface destroy];iface=nil;}
                                 else pipe=[iface copyPipeWithAddress:0x81 error:&error];}
-                            if(!pipe){if(iface){[iface destroy];iface=nil;}retry=true;}
+                            if(!pipe){closeInterface();retry=true;}
                         }
                         if(pipe){
                             {std::lock_guard<std::mutex> lock(owner.mutex);auto version=owner.generations[id];if(resumed||generation!=version){
@@ -61,14 +65,14 @@ class USBIdentityMonitor {
                             BOOL ok=[pipe sendIORequestWithData:data bytesTransferred:&count completionTimeout:.08 error:&error];
                             if(host()-before>.002||!count)warm=true;
                             if(count)parser.append((const uint8_t*)data.bytes,count);
-                            if(!ok&&error.code!=(NSInteger)kIOReturnTimeout){[iface destroy];iface=nil;pipe=nil;warm=false;resumed=true;retry=true;}
+                            if(!ok&&error.code!=(NSInteger)kIOReturnTimeout){closeInterface();warm=false;resumed=true;retry=true;}
                         }
                     }
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(retry?10:1));
             }}
-            // 設定processが読んでいる間にalternateを戻さない。
-            if(iface){USBControlLock guard(4000);if(guard&&previous!=1)[iface selectAlternateSetting:previous error:nil];[iface destroy];}
+            // interfaceを閉じてからleaseを返すので、次の設定processと所有権が重ならない。
+            closeInterface();
         }}
     };
     std::map<uint64_t,std::unique_ptr<Reader>> readers;std::thread supervisor;

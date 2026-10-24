@@ -57,14 +57,6 @@ struct ProductionMeter: View {
             .accessibilityValue(meter.clipped ? "クリップ" : String(format: "%.1f dBFS", meter.level))
     }
 }
-struct RecordingCounter: View {
-    @ObservedObject var feed: ReceiverFeed
-    let recording: Bool
-    var body: some View {
-        Text(String(format: "%@ %02d:%02d", recording ? "● MAC REC" : "MAC", Int(feed.frame.seconds) / 60, Int(feed.frame.seconds) % 60))
-            .font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(recording ? .red : Console.muted)
-    }
-}
 
 private struct MeterScale: View, Equatable {
     var body: some View {

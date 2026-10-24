@@ -76,6 +76,16 @@ struct ProcessingControls: View {
                 Text("NC · OFF").tag("none"); Text("NC · BASIC").tag("basic"); Text("NC · STRONG").tag("strong")
                 if tx.noise_mode == "unknown" { Text("NC · —").tag("unknown") }
             }.disabled(!tx.connected || store.settingsLocked)
+            Picker("音質 TX\(tx.index)", selection: Binding(get: { tx.eq ?? -1 }, set: {
+                store.send("eq", receiver: receiver, values: ["target": String(tx.index), "tx_serial": tx.serial, "mode": String($0)])
+            })) {
+                Text("EQ · Regular").tag(0); Text("EQ · Rich").tag(1); Text("EQ · Bright").tag(2)
+                if (tx.eq ?? -1) < 0 { Text("EQ · —").tag(-1) }
+            }.disabled(!tx.connected || tx.serial.isEmpty || (tx.eq ?? -1) < 0 || store.settingsLocked)
+            Toggle(isOn: Binding(get: { tx.low_cut == 1 }, set: {
+                store.send("low_cut", receiver: receiver, values: ["target": String(tx.index), "tx_serial": tx.serial, "value": $0 ? "1" : "0"])
+            })) { Text("LOW CUT \(tx.low_cut == 1 ? "ON" : tx.low_cut == 0 ? "OFF" : "—")").font(.system(size: 8, design: .monospaced)).foregroundStyle(Console.cyan) }
+                .toggleStyle(.button).disabled(!tx.connected || tx.serial.isEmpty || (tx.low_cut ?? -1) < 0 || store.settingsLocked)
         }.labelsHidden().controlSize(.mini)
     }
 }
@@ -98,7 +108,9 @@ struct BatchAudioPanel: View {
     @State private var lossless = -1
     @State private var agc = -1
     @State private var noise = "keep"
-    private var changed: Bool { lossless >= 0 || agc >= 0 || noise != "keep" }
+    @State private var eq = -1
+    @State private var lowCut = -1
+    private var changed: Bool { lossless >= 0 || agc >= 0 || noise != "keep" || eq >= 0 || lowCut >= 0 }
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             HStack {
@@ -111,6 +123,8 @@ struct BatchAudioPanel: View {
                 Picker("ロスレス無線伝送", selection: $lossless) { Text("変更しない").tag(-1); Text("OFF").tag(0); Text("ON · 48k / 24-bit").tag(1) }
                 Picker("自動ゲイン", selection: $agc) { Text("変更しない").tag(-1); Text("OFF").tag(0); Text("Automatic").tag(1); Text("Dynamic").tag(2) }
                 Picker("ノイキャン", selection: $noise) { Text("変更しない").tag("keep"); Text("OFF").tag("none"); Text("BASIC").tag("basic"); Text("STRONG").tag("strong") }
+                Picker("音質", selection: $eq) { Text("変更しない").tag(-1); Text("Regular").tag(0); Text("Rich").tag(1); Text("Bright").tag(2) }
+                Picker("Low Cut", selection: $lowCut) { Text("変更しない").tag(-1); Text("OFF").tag(0); Text("ON").tag(1) }
             }.pickerStyle(.menu)
             Divider()
             ScrollView {
@@ -124,7 +138,7 @@ struct BatchAudioPanel: View {
                 Button("キャンセル") { dismiss() }.keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("選択RXへ適用") {
-                    store.bulk("audio_all", values: ["lossless": String(lossless), "agc": String(agc), "noise": noise]); dismiss()
+                    store.bulk("audio_all", values: ["lossless": String(lossless), "agc": String(agc), "noise": noise, "eq": String(eq), "low_cut": String(lowCut)]); dismiss()
                 }.buttonStyle(ConsoleButton(active: true, color: Console.cyan)).disabled(!changed || store.targets.isEmpty || store.targetsBusy || store.settingsLocked)
             }
         }.padding(24).frame(width: 430).background(Console.panel)

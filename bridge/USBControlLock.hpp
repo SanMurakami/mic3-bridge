@@ -21,6 +21,8 @@ public:
             held=!flock(fd,LOCK_SH|LOCK_NB);
         }else if(acquire(intent,LOCK_EX))held=acquire(fd,LOCK_EX);
     }
+    bool writerWaiting()const{if(intent<0)return true;if(flock(intent,LOCK_SH|LOCK_NB))return true;flock(intent,LOCK_UN);return false;}
+    USBControlLock(const USBControlLock&)=delete;USBControlLock& operator=(const USBControlLock&)=delete;
     explicit operator bool()const{return held;}
     ~USBControlLock(){if(fd>=0)close(fd);if(intent>=0)close(intent);}
 };
