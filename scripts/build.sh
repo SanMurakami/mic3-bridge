@@ -12,10 +12,13 @@ clang -std=c11 -O2 -Wall -Wextra -Werror -fblocks -fvisibility=hidden -bundle \
 cp "$repo_dir/packaging/Driver-Info.plist" "$driver_dir/Info.plist"
 cp "$repo_dir/vendor/apple-null-audio/LICENSE.txt" "$driver_dir/Resources/Apple-LICENSE.txt"
 clang++ -std=c++17 -O2 -fobjc-arc -Wall -Wextra -Werror \
-    -framework CoreAudio -framework CoreFoundation -framework Foundation -framework AVFoundation -framework IOKit \
+    -framework CoreAudio -framework CoreFoundation -framework Foundation -framework AVFoundation -framework IOKit -framework IOUSBHost -framework AudioToolbox \
     "$repo_dir/bridge/Bridge.mm" -o "$app_dir/MacOS/dji-mic-bridge" \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$repo_dir/packaging/Bridge-Info.plist"
+swiftc -O -parse-as-library -warnings-as-errors -framework SwiftUI -framework AppKit -framework AVFoundation \
+    "$repo_dir/app/DJIMicApp.swift" -o "$app_dir/MacOS/DJIMicBridge"
 cp "$repo_dir/packaging/Bridge-Info.plist" "$app_dir/Info.plist"
 codesign --force --sign - "$build_dir/DJIMicInputs.driver"
+codesign --force --sign - "$app_dir/MacOS/dji-mic-bridge"
 codesign --force --sign - "$build_dir/DJI Mic Bridge.app"
 printf 'ビルド完了: %s\n' "$build_dir"
