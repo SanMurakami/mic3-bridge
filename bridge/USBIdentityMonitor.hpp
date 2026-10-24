@@ -8,78 +8,91 @@
 #include <set>
 #include <mutex>
 #include <thread>
+#include <memory>
 #include <mach/mach_time.h>
 #include "MicIdentity.hpp"
 #include "MicTelemetry.hpp"
 #include "USBControlLock.hpp"
 namespace dji {
 class USBIdentityMonitor {
-    std::atomic<bool> running{true};
-    std::mutex mutex;
+    std::atomic<bool> running{true};std::mutex mutex;
     std::map<uint64_t,Identity> identities;
     std::map<uint64_t,Telemetry> telemetry;
     std::map<uint64_t,std::chrono::steady_clock::time_point> updated;
-    std::set<uint64_t> refreshIDs;
-    std::map<uint64_t,std::chrono::steady_clock::time_point> attempted;
-    std::thread worker;
-    static uint64_t parentID(io_service_t service) {
-        io_registry_entry_t parent=0,current=service;IOObjectRetain(current);uint64_t id=0;
-        while(IORegistryEntryGetParentEntry(current,kIOServicePlane,&parent)==KERN_SUCCESS){IOObjectRelease(current);current=parent;
-            if(IOObjectConformsTo(current,"IOUSBHostDevice")){IORegistryEntryGetRegistryEntryID(current,&id);break;}}
-        IOObjectRelease(current);return id;
-    }
-    void inspect(io_service_t service,uint64_t id) {@autoreleasepool{
-        USBControlLock guard;if(!guard)return;
-        Identity cached;{std::lock_guard<std::mutex> lock(mutex);auto found=identities.find(id);if(found!=identities.end())cached=found->second;}
-        NSError *error=nil;IOUSBHostInterface *interface=[[IOUSBHostInterface alloc] initWithIOService:service options:0 queue:nil error:&error interestHandler:nil];
-        if(!interface)return;
-        unsigned previous=interface.interfaceDescriptor?interface.interfaceDescriptor->bAlternateSetting:0;
-        if(previous!=1&&![interface selectAlternateSetting:1 error:&error]){[interface destroy];return;}
-        IOUSBHostPipe *pipe=[interface copyPipeWithAddress:0x81 error:&error];IdentityParser parser;
-        TelemetryParser status;
-        parser.onFrame=[&](const uint8_t *p,size_t n){auto old=status.state.timecode;bool known=status.state.known;status.frame(p,n);if(status.state.known&&(!known||old!=status.state.timecode)){mach_timebase_info_data_t tb;mach_timebase_info(&tb);status.state.observedHostSeconds=mach_absolute_time()*(double)tb.numer/tb.denom/1e9;}};
-        auto start=std::chrono::steady_clock::now();
-        while(pipe&&running&&std::chrono::steady_clock::now()-start<std::chrono::seconds(2)){
-            NSMutableData *data=[NSMutableData dataWithLength:2048];NSUInteger count=0;error=nil;
-            BOOL ok=[pipe sendIORequestWithData:data bytesTransferred:&count completionTimeout:.08 error:&error];
-            if(count)parser.append((const uint8_t*)data.bytes,count);
-            if(completeTelemetry(status.state)&&(!cached.serial.empty()||!parser.identity.serial.empty())&&std::chrono::steady_clock::now()-start>=std::chrono::milliseconds(160))break;
-            if(!ok&&error.code!=(NSInteger)kIOReturnTimeout)break;
-        }
-        if(previous!=1)[interface selectAlternateSetting:previous error:nil];[interface destroy];
-        if(parser.identity.serial.empty())parser.identity=cached;
-        else if(parser.identity.serial==cached.serial&&parser.identity.firmware.empty())parser.identity.firmware=cached.firmware;
-        if(!parser.identity.serial.empty()){std::lock_guard<std::mutex> lock(mutex);identities[id]=parser.identity;if(status.state.known){telemetry[id]=status.state;updated[id]=std::chrono::steady_clock::now();}refreshIDs.erase(id);}
-    }}
-    void loop(){while(running){@autoreleasepool{
-        std::set<uint64_t> live;
-        io_iterator_t iterator=0;
-        if(IOServiceGetMatchingServices(kIOMainPortDefault,IOServiceMatching("IOUSBHostInterface"),&iterator)==KERN_SUCCESS){
-            io_service_t service;
-            while((service=IOIteratorNext(iterator))){
-                CFMutableDictionaryRef raw=nullptr;IORegistryEntryCreateCFProperties(service,&raw,kCFAllocatorDefault,0);NSDictionary *p=CFBridgingRelease(raw);
-                io_name_t name={0};IORegistryEntryGetName(service,name);
-                if([p[@"idVendor"] unsignedIntValue]==0x2ca3&&[p[@"bInterfaceNumber"] unsignedIntValue]==4&&[p[@"bInterfaceClass"] unsignedIntValue]==255&&std::string(name)=="com.dji.mic"){
-                    uint64_t id=parentID(service);if(id)live.insert(id);bool known=false;{std::lock_guard<std::mutex> lock(mutex);known=identities.count(id)&&!refreshIDs.count(id)&&updated.count(id)&&std::chrono::steady_clock::now()-updated[id]<std::chrono::seconds(3);}
-                    auto now=std::chrono::steady_clock::now();
-                    if(id&&!known&&(!attempted.count(id)||now-attempted[id]>std::chrono::seconds(3))){attempted[id]=now;inspect(service,id);}
+    std::map<uint64_t,uint64_t> generations;
+    static double host(){mach_timebase_info_data_t t;mach_timebase_info(&t);return mach_absolute_time()*(double)t.numer/t.denom/1e9;}
+    static uint64_t parentID(io_service_t service){io_registry_entry_t parent=0,current=service;IOObjectRetain(current);uint64_t id=0;
+        while(IORegistryEntryGetParentEntry(current,kIOServicePlane,&parent)==KERN_SUCCESS){IOObjectRelease(current);current=parent;if(IOObjectConformsTo(current,"IOUSBHostDevice")){IORegistryEntryGetRegistryEntryID(current,&id);break;}}IOObjectRelease(current);return id;}
+    struct Reader {
+        USBIdentityMonitor& owner;uint64_t id;io_service_t service;std::atomic<bool> alive{true};std::thread worker;
+        Reader(USBIdentityMonitor& owner,uint64_t id,io_service_t service):owner(owner),id(id),service(service){IOObjectRetain(service);worker=std::thread([this]{run();});}
+        ~Reader(){alive=false;worker.join();IOObjectRelease(service);}
+        void run(){@autoreleasepool{
+            IOUSBHostInterface *iface=nil;IOUSBHostPipe *pipe=nil;unsigned previous=0;
+            IdentityParser parser;TelemetryParser state;Identity identity;uint64_t generation=0;bool resumed=true,warm=false;
+            parser.onFrame=[&](const uint8_t *p,size_t n){
+                if(!parser.identity.serial.empty())identity=parser.identity;
+                auto revision=state.clockRevision;state.frame(p,n);bool clockArrived=state.clockRevision!=revision;std::lock_guard<std::mutex> lock(owner.mutex);
+                if(!identity.serial.empty())owner.identities[id]=identity;
+                // 受信再開時の滞留通知を排出してからclock anchorを更新する。
+                if(!warm||!state.state.known||identity.serial.empty())return;
+                auto old=owner.telemetry.find(id);
+                observeTelemetryClock(state.state,old==owner.telemetry.end()?Telemetry{}:old->second,clockArrived,host());
+                owner.telemetry[id]=state.state;owner.updated[id]=std::chrono::steady_clock::now();
+            };
+            while(alive&&owner.running){@autoreleasepool{
+                bool retry=false;
+                {USBControlLock guard(0,true);
+                    if(!guard){resumed=true;retry=true;}
+                    else {
+                        if(!iface){NSError *error=nil;iface=[[IOUSBHostInterface alloc]initWithIOService:service options:0 queue:nil error:&error interestHandler:nil];
+                            if(iface){previous=iface.interfaceDescriptor?iface.interfaceDescriptor->bAlternateSetting:0;
+                                if(previous!=1&&![iface selectAlternateSetting:1 error:&error]){[iface destroy];iface=nil;}
+                                else pipe=[iface copyPipeWithAddress:0x81 error:&error];}
+                            if(!pipe){if(iface){[iface destroy];iface=nil;}retry=true;}
+                        }
+                        if(pipe){
+                            {std::lock_guard<std::mutex> lock(owner.mutex);auto version=owner.generations[id];if(resumed||generation!=version){
+                                auto found=owner.telemetry.find(id);if(found!=owner.telemetry.end())state.seed(found->second);
+                                auto foundIdentity=owner.identities.find(id);if(foundIdentity!=owner.identities.end())identity=foundIdentity->second;
+                                generation=version;parser.discardPending();warm=false;resumed=false;
+                            }}
+                            NSMutableData *data=[NSMutableData dataWithLength:2048];NSUInteger count=0;NSError *error=nil;auto before=host();
+                            BOOL ok=[pipe sendIORequestWithData:data bytesTransferred:&count completionTimeout:.08 error:&error];
+                            if(host()-before>.002||!count)warm=true;
+                            if(count)parser.append((const uint8_t*)data.bytes,count);
+                            if(!ok&&error.code!=(NSInteger)kIOReturnTimeout){[iface destroy];iface=nil;pipe=nil;warm=false;resumed=true;retry=true;}
+                        }
+                    }
                 }
+                std::this_thread::sleep_for(std::chrono::milliseconds(retry?10:1));
+            }}
+            // 設定processが読んでいる間にalternateを戻さない。
+            if(iface){USBControlLock guard(4000);if(guard&&previous!=1)[iface selectAlternateSetting:previous error:nil];[iface destroy];}
+        }}
+    };
+    std::map<uint64_t,std::unique_ptr<Reader>> readers;std::thread supervisor;
+    void loop(){while(running){@autoreleasepool{
+        std::set<uint64_t> live;io_iterator_t iterator=0;
+        if(IOServiceGetMatchingServices(kIOMainPortDefault,IOServiceMatching("IOUSBHostInterface"),&iterator)==KERN_SUCCESS){io_service_t service;
+            while((service=IOIteratorNext(iterator))){CFMutableDictionaryRef raw=nullptr;IORegistryEntryCreateCFProperties(service,&raw,kCFAllocatorDefault,0);NSDictionary *p=CFBridgingRelease(raw);io_name_t name={0};IORegistryEntryGetName(service,name);
+                if([p[@"idVendor"] unsignedIntValue]==0x2ca3&&[p[@"idProduct"] unsignedIntValue]==0x4115&&[p[@"bInterfaceNumber"] unsignedIntValue]==4&&[p[@"bInterfaceClass"] unsignedIntValue]==255&&std::string(name)=="com.dji.mic"){
+                    auto id=parentID(service);if(id){live.insert(id);if(!readers.count(id))readers[id]=std::make_unique<Reader>(*this,id,service);}}
                 IOObjectRelease(service);
-            }
-            IOObjectRelease(iterator);
+            }IOObjectRelease(iterator);
         }
-        {std::lock_guard<std::mutex> lock(mutex);for(auto it=identities.begin();it!=identities.end();)if(!live.count(it->first)){telemetry.erase(it->first);updated.erase(it->first);refreshIDs.erase(it->first);it=identities.erase(it);}else ++it;}
-        for(auto it=attempted.begin();it!=attempted.end();)if(!live.count(it->first))it=attempted.erase(it);else ++it;
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }}}
+        for(auto it=readers.begin();it!=readers.end();)if(!live.count(it->first))it=readers.erase(it);else ++it;
+        {std::lock_guard<std::mutex> lock(mutex);for(auto it=identities.begin();it!=identities.end();)if(!live.count(it->first)){telemetry.erase(it->first);updated.erase(it->first);generations.erase(it->first);it=identities.erase(it);}else ++it;}
+        for(int i=0;i<25&&running;i++)std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }}readers.clear();}
 public:
-    USBIdentityMonitor():worker([this]{loop();}){}
-    ~USBIdentityMonitor(){running=false;worker.join();}
+    USBIdentityMonitor():supervisor([this]{loop();}){}
+    ~USBIdentityMonitor(){running=false;supervisor.join();}
     void observed(const std::string& serial,unsigned index,const std::string& mode){std::lock_guard<std::mutex> lock(mutex);for(auto& [id,identity]:identities)if(identity.serial==serial&&telemetry[id].transmitters.count(index))telemetry[id].transmitters[index].noise=mode;}
-    void refresh(const std::string& serial){std::lock_guard<std::mutex> lock(mutex);for(auto& [id,identity]:identities)if(identity.serial==serial)refreshIDs.insert(id);}
-    void update(const std::string& serial,const Telemetry& state){std::lock_guard<std::mutex> lock(mutex);for(auto& [id,identity]:identities)if(identity.serial==serial){telemetry[id]=state;updated[id]=std::chrono::steady_clock::now();refreshIDs.erase(id);}}
+    void refresh(const std::string& serial){std::lock_guard<std::mutex> lock(mutex);for(auto& [id,identity]:identities)if(identity.serial==serial)generations[id]++;}
+    void update(const std::string& serial,const Telemetry& state){std::lock_guard<std::mutex> lock(mutex);for(auto& [id,identity]:identities)if(identity.serial==serial){telemetry[id]=state;updated[id]=std::chrono::steady_clock::now();generations[id]++;}}
     Telemetry status(const std::string& serial){std::lock_guard<std::mutex> lock(mutex);for(auto& [id,identity]:identities)if(identity.serial==serial&&updated.count(id)&&std::chrono::steady_clock::now()-updated[id]<std::chrono::seconds(12))return telemetry[id];return {};}
     std::map<unsigned,std::string> controls(const std::string& serial){std::map<unsigned,std::string> result;for(auto& [index,tx]:status(serial).transmitters)result[index]=tx.noise;return result;}
-    Identity get(uint64_t id){std::lock_guard<std::mutex> lock(mutex);auto found=identities.find(id);return found==identities.end()?Identity{}:found->second;}
+    Identity get(uint64_t id){std::lock_guard<std::mutex> lock(mutex);auto it=identities.find(id);return it==identities.end()?Identity{}:it->second;}
 };
 }

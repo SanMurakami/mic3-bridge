@@ -12,6 +12,25 @@ int main(){
   assert(state.state.timecode=="00:27:34:08");assert(state.state.battery==1);
   auto t=state.state.transmitters.at(2);assert(t.recording&&t.noise=="basic"&&t.total==286&&t.remaining==278&&t.battery==1);
  }
+ // EQとLowCutは独立した上位bit。未知EQ=3は操作不能として扱う。
+ for(unsigned eq=0;eq<4;eq++)for(unsigned cut=0;cut<2;cut++){
+  std::vector<uint8_t> data(26);data[3]=uint8_t((eq<<6)|(cut<<5)|0x10); // RECを維持
+  std::vector<uint8_t> payload={3,32,0,2,4,0,0,0,26};payload.insert(payload.end(),data.begin(),data.end());auto packet=frame(payload);
+  dji::TelemetryParser state;state.frame(packet.data(),packet.size());auto tx=state.state.transmitters.at(3);
+  assert(tx.eq==(eq<3?int(eq):-1)&&tx.lowCut==int(cut)&&tx.recording);
+  assert(state.clockRevision==0); // TX-only通知でRX時計の取得時刻を更新しない
+ }
+ {dji::TelemetryParser state;state.frame(f.data(),f.size());assert(state.clockRevision==1);auto snapshot=state.state;
+  dji::TelemetryParser resumed;resumed.seed(snapshot);assert(resumed.state.transmitters.at(2).recording&&resumed.clockRevision==0);
+  resumed.frame(f.data(),f.size());assert(resumed.clockRevision==1);
+ }
+ {
+  dji::Telemetry before,next;before.timecode="01:00:00:00";before.observedHostSeconds=10;
+  next.timecode="00:59:59:00";dji::observeTelemetryClock(next,before,false,20);assert(next.timecode==before.timecode&&next.observedHostSeconds==10);
+  next.timecode="01:00:01:00";dji::observeTelemetryClock(next,before,true,11);assert(next.observedHostSeconds==11);
+  before=next;dji::observeTelemetryClock(next,before,true,11.5);assert(next.observedHostSeconds==11);
+  next.timecode="00:00:00:00";dji::observeTelemetryClock(next,before,true,12);assert(next.observedHostSeconds==12);
+ }
  // signed gain / AGC OFF・AUTO・DYN・未知enum / RX losslessを独立に検証。
  for(int mode=0;mode<4;mode++)for(int enabled=0;enabled<2;enabled++){
   std::vector<uint8_t> data(26);data[2]=enabled?4:0;data[5]=uint8_t(mode<<6);data[7]=uint8_t(-12);

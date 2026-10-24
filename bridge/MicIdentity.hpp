@@ -41,6 +41,7 @@ public:
     Identity identity;
     std::function<void(const uint8_t*,size_t)> onFrame;
     unsigned validFrames=0,rejectedFrames=0;
+    void discardPending(){buffer.clear();}
     void append(const uint8_t *data,size_t size) {
         // USB の packet 境界と DUML の frame 境界は一致しない。
         for(size_t offset=0;offset<size;) {

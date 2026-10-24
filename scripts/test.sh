@@ -31,3 +31,7 @@ clang++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
 clang++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
     "$repo_dir/tests/timecode-sync-test.cpp" -o "$repo_dir/.build/timecode-sync-test"
 "$repo_dir/.build/timecode-sync-test"
+
+clang++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
+    "$repo_dir/tests/usb-lock-test.cpp" -o "$repo_dir/.build/usb-lock-test"
+"$repo_dir/.build/usb-lock-test"

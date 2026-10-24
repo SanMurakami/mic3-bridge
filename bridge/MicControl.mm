@@ -17,7 +17,7 @@ static uint64_t parentID(io_service_t service){
     IOObjectRelease(current);return id;
 }
 static NSDictionary *jsonStatus(const dji::Telemetry& s){
-    NSMutableArray *tx=[NSMutableArray array];for(auto& [index,t]:s.transmitters)[tx addObject:@{@"index":@(index),@"serial":@(t.serial.c_str()),@"noise_mode":@(t.noise.c_str()),@"timecode":@(t.timecode.c_str()),@"gain_db":@(t.gain),@"agc":@(t.agc),@"agc_enabled":@(t.agcEnabled),@"agc_mode_raw":@(t.agcMode),@"battery_code":@(t.battery),@"charging":@(t.charging),@"recording":@(t.recording),@"total":@(t.total),@"remaining":@(t.remaining)}];
+    NSMutableArray *tx=[NSMutableArray array];for(auto& [index,t]:s.transmitters)[tx addObject:@{@"index":@(index),@"serial":@(t.serial.c_str()),@"noise_mode":@(t.noise.c_str()),@"timecode":@(t.timecode.c_str()),@"eq":@(t.eq),@"low_cut":@(t.lowCut),@"gain_db":@(t.gain),@"agc":@(t.agc),@"agc_enabled":@(t.agcEnabled),@"agc_mode_raw":@(t.agcMode),@"battery_code":@(t.battery),@"charging":@(t.charging),@"recording":@(t.recording),@"total":@(t.total),@"remaining":@(t.remaining)}];
     return @{@"known":@(s.known),@"connected_mask":@(s.connectedMask),@"observed_host_seconds":@(s.observedHostSeconds),@"all_recording":@(s.allRecording),@"charging":@(s.charging),@"lossless":@(s.lossless),@"gain_db":@(s.gain),@"tc_enabled":@(s.tcEnabled),@"fps":@(s.fps),@"output":@(s.output),@"timecode":@(s.timecode.c_str()),@"battery_code":@(s.battery),@"transmitters":tx};
 }
 #include "TimecodeSyncControl.hpp"
@@ -35,12 +35,12 @@ int main(int argc,const char *argv[]){@autoreleasepool{
         }
         if(argc<3)throw std::runtime_error("操作と本体シリアルが必要です。");
         std::string op=argv[1],serial=argv[2];if(!dji::validSerial(serial))throw std::runtime_error("本体シリアルが不正です。");
-        unsigned target=0,enabled=0,fps=0,output=0;int gain=0,lossless=-1,agc=-1;std::string mode,txSerial;
+        unsigned target=0,enabled=0,fps=0,output=0;int gain=0,lossless=-1,agc=-1,eq=-1,lowCut=-1;std::string mode,txSerial;
         auto number=[](const char *s,unsigned limit){std::string v=s;if(v.empty()||!std::all_of(v.begin(),v.end(),[](char c){return c>='0'&&c<='9';}))throw std::runtime_error("設定値が不正です。");auto n=std::stoul(v);if(n>limit)throw std::runtime_error("設定値が範囲外です。");return unsigned(n);};
         auto signedNumber=[](const char *s,int low,int high){std::string v=s;size_t offset=0;int n;try{n=std::stoi(v,&offset);}catch(...){throw std::runtime_error("設定値が不正です。");}if(offset!=v.size()||n<low||n>high)throw std::runtime_error("設定値が範囲外です。");return n;};
-        if((op=="--gain"||op=="--agc")&&argc==6){target=number(argv[3],4);txSerial=argv[4];if(!target||!dji::validSerial(txSerial))throw std::runtime_error("送信機のシリアルが必要です。");if(op=="--gain")gain=signedNumber(argv[5],-12,12);else agc=number(argv[5],2);}
+        if((op=="--gain"||op=="--agc"||op=="--eq"||op=="--low-cut"||op=="--record-tx")&&argc==6){target=number(argv[3],4);txSerial=argv[4];if(!target||!dji::validSerial(txSerial))throw std::runtime_error("送信機のシリアルが必要です。");if(op=="--gain")gain=signedNumber(argv[5],-12,12);else if(op=="--agc")agc=number(argv[5],2);else if(op=="--eq")eq=number(argv[5],2);else if(op=="--low-cut")lowCut=number(argv[5],1);else enabled=number(argv[5],1);}
         else if(op=="--lossless"&&argc==4){lossless=number(argv[3],1);}
-        else if(op=="--profile"&&argc==6){lossless=signedNumber(argv[3],-1,1);agc=signedNumber(argv[4],-1,2);mode=argv[5];if(mode!="keep"&&mode!="none"&&mode!="basic"&&mode!="strong")throw std::runtime_error("ノイキャン設定が不正です。");if(lossless<0&&agc<0&&mode=="keep")throw std::runtime_error("変更する設定がありません。");}
+        else if(op=="--profile"&&(argc==6||argc==8)){lossless=signedNumber(argv[3],-1,1);agc=signedNumber(argv[4],-1,2);mode=argv[5];if(mode!="keep"&&mode!="none"&&mode!="basic"&&mode!="strong")throw std::runtime_error("ノイキャン設定が不正です。");if(argc==8){eq=signedNumber(argv[6],-1,2);lowCut=signedNumber(argv[7],-1,1);}if(lossless<0&&agc<0&&mode=="keep"&&eq<0&&lowCut<0)throw std::runtime_error("変更する設定がありません。");}
         else if(op=="--tc"&&argc==6){enabled=number(argv[3],1);fps=number(argv[4],7);output=number(argv[5],3);}
         else if(op=="--record"&&argc==4){enabled=number(argv[3],1);}
         else if(op=="--set"&&argc==5){target=number(argv[3],4);mode=argv[4];if(target<1||(mode!="none"&&mode!="basic"&&mode!="strong"))throw std::runtime_error("送信機またはノイキャン設定が不正です。");}
@@ -65,13 +65,13 @@ int main(int argc,const char *argv[]){@autoreleasepool{
             auto identified=[&](){if(parser.identity.serial.empty()&&!registryHint)return false;if(!parser.identity.serial.empty()&&parser.identity.serial!=serial)return true;
                 if(!dji::completeTelemetry(telemetry.state)||std::chrono::steady_clock::now()-identificationStart<std::chrono::milliseconds(120))return false;
                 if(target&&!telemetry.state.transmitters.count(target))return false;return true;};
-            readUntil(registryHint?1.65:3.5,identified);
+            readUntil(3.5,identified); // RXのbindが既知でもTX個体通知が遅い周期は待つ。揃い次第終了。
             [probes addObject:@{@"serial":@(parser.identity.serial.c_str()),@"known":@(telemetry.state.known),@"tx_count":@(telemetry.state.transmitters.size()),@"registry_id":@(registry),@"cached_identity":@(registryHint!=0),@"milliseconds":@(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-identificationStart).count())}];
             if((parser.identity.serial==serial||(registryHint&&parser.identity.serial.empty()))&&dji::completeTelemetry(telemetry.state)&&in&&out){
                 auto initial=telemetry.state;uint16_t sequence=arc4random_uniform(65536);
                 auto send=[&](unsigned setting,unsigned value,auto matches){
                     
-                    if(setting!=0x27&&setting!=0x24&&setting!=0x2c&&setting!=0x39&&setting!=0x32&&setting!=0x34&&setting!=0x35&&setting!=0x36&&setting!=0x37&&setting!=0x38)return false;
+                    if(setting!=0x02&&setting!=0x03&&setting!=0x29&&setting!=0x27&&setting!=0x24&&setting!=0x2c&&setting!=0x39&&setting!=0x32&&setting!=0x34&&setting!=0x35&&setting!=0x36&&setting!=0x37&&setting!=0x38)return false;
                     auto sameTX=[&](){if(target==0)return true;auto a=initial.transmitters.find(target),b=telemetry.state.transmitters.find(target);return a!=initial.transmitters.end()&&b!=telemetry.state.transmitters.end()&&dji::validSerial(a->second.serial)&&a->second.serial==b->second.serial;};
                     for(int attempt=0;attempt<2;attempt++){if(!sameTX())return false;uint16_t seq=sequence++;std::vector<uint8_t> f(22,0);f[0]=0x55;f[1]=22;f[2]=4;f[3]=dji::crc8(f.data(),3);f[4]=2;f[5]=0x5a;f[6]=seq&255;f[7]=seq>>8;f[8]=0x40;f[9]=0x5b;f[10]=1;f[11]=2;f[12]=dji::txWireTarget(target)&255;f[16]=setting&255;f[17]=setting>>8;f[18]=1;f[19]=value&255;auto crc=dji::crc16(f.data(),20);f[20]=crc&255;f[21]=crc>>8;
                         NSMutableData *data=[NSMutableData dataWithBytes:f.data() length:f.size()];NSUInteger sent=0;NSError *e=nil;BOOL ok=[out sendIORequestWithData:data bytesTransferred:&sent completionTimeout:.5 error:&e];[events addObject:@{@"setting":@(setting),@"target":@(target),@"wire_target":@(dji::txWireTarget(target)),@"value":@(value),@"sequence":@(seq),@"sent":@(sent)}];auto confirmed=[&](){return acknowledgements.count(seq)&&sameTX()&&matches(telemetry.state);};readUntil(.8,confirmed);if(ok&&sent==22&&confirmed())return true;
@@ -85,8 +85,16 @@ int main(int argc,const char *argv[]){@autoreleasepool{
                 auto applyNoise=[&](unsigned index,const std::string& desired){target=index;
                     auto it=telemetry.state.transmitters.find(index);if(it!=telemetry.state.transmitters.end()&&it->second.noise==desired)return true;
                     bool level=true;if(desired!="none")level=send(0x37,desired=="strong",[](auto&){return true;});return level&&send(0x38,desired!="none",[&](auto& s){return s.transmitters.count(index)&&s.transmitters.at(index).noise==desired;});};
+                auto applyTone=[&](unsigned index,bool cut,int value){target=index;auto it=telemetry.state.transmitters.find(index);if(it==telemetry.state.transmitters.end())return false;
+                    return (cut?it->second.lowCut:it->second.eq)==value||send(cut?0x03:0x29,value,[&](auto& s){auto t=s.transmitters.find(index);return t!=s.transmitters.end()&&(cut?t->second.lowCut:t->second.eq)==value;});};
                 if(op=="--status")success=true;
-                else if(op=="--gain"){
+                else if(op=="--eq"||op=="--low-cut"){
+                    auto tx=selectTX();bool cut=op=="--low-cut";int previous=cut?tx.lowCut:tx.eq;if(previous<0)throw std::runtime_error("現在の音声設定を取得できません。");
+                    success=applyTone(target,cut,cut?lowCut:eq);if(!success){bool restored=applyTone(target,cut,previous);message=restored?"音声設定を確認できず元へ戻しました。":"音声設定の復元を確認できません。";}
+                }else if(op=="--record-tx"){
+                    auto tx=selectTX();success=tx.recording==bool(enabled)||send(0x02,enabled,[&](auto& s){auto t=s.transmitters.find(target);return t!=s.transmitters.end()&&t->second.recording==bool(enabled);});
+                    if(!success)message="本体録音の応答を確認できません。";
+                }else if(op=="--gain"){
                     auto tx=selectTX();if(tx.agc!=0)throw std::runtime_error("自動ゲインをOFFにしてから手動ゲインを変更してください。");
                     success=tx.gain==gain||send(0x39,unsigned(gain),[&](auto& s){return s.transmitters.count(target)&&s.transmitters.at(target).gain==gain;});
                     if(!success){bool restored=send(0x39,unsigned(tx.gain),[&](auto& s){return s.transmitters.count(target)&&s.transmitters.at(target).gain==tx.gain;});message=restored?"ゲインを確認できず元へ戻しました。":"ゲインの復元を確認できません。実機を確認してください。";}
@@ -99,12 +107,13 @@ int main(int argc,const char *argv[]){@autoreleasepool{
                 }else if(op=="--profile"){
                     success=true;bool touchedLossless=false;std::vector<unsigned> touched;
                     if(lossless>=0){target=0;touchedLossless=true;success=initial.lossless==lossless||send(0x27,lossless,[&](auto& s){return s.lossless==lossless;});}
-                    for(auto& [index,tx]:initial.transmitters){if(!success)break;if(agc<0&&mode=="keep")break;
-                        if(tx.agcEnabled<0||tx.agcMode<0||(mode!="keep"&&tx.noise=="unknown")){success=false;break;}touched.push_back(index);
+                    for(auto& [index,tx]:initial.transmitters){if(!success)break;if(agc<0&&mode=="keep"&&eq<0&&lowCut<0)break;
+                        if(tx.agcEnabled<0||tx.agcMode<0||(mode!="keep"&&tx.noise=="unknown")||(eq>=0&&tx.eq<0)||(lowCut>=0&&tx.lowCut<0)){success=false;break;}touched.push_back(index);
                         if(agc>=0)success=applyAGC(index,agc!=0,agc?agc:tx.agcMode);
                         if(success&&mode!="keep")success=applyNoise(index,mode);
+                        if(success&&eq>=0)success=applyTone(index,false,eq);if(success&&lowCut>=0)success=applyTone(index,true,lowCut);
                     }
-                    if(!success){bool restored=true;for(auto index:touched){auto& tx=initial.transmitters.at(index);if(agc>=0)restored=applyAGC(index,tx.agcEnabled,tx.agcMode)&&restored;if(mode!="keep")restored=applyNoise(index,tx.noise)&&restored;}
+                    if(!success){bool restored=true;for(auto index:touched){auto& tx=initial.transmitters.at(index);if(agc>=0)restored=applyAGC(index,tx.agcEnabled,tx.agcMode)&&restored;if(mode!="keep")restored=applyNoise(index,tx.noise)&&restored;if(eq>=0)restored=applyTone(index,false,tx.eq)&&restored;if(lowCut>=0)restored=applyTone(index,true,tx.lowCut)&&restored;}
                         if(touchedLossless){target=0;restored=send(0x27,initial.lossless,[&](auto& s){return s.lossless==initial.lossless;})&&restored;}message=restored?"一括設定を確認できず、このRXを元へ戻しました。":"一部設定の復元を確認できません。実機を確認してください。";}
                 }
                 else if(op=="--tc"){
