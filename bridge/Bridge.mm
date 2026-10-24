@@ -439,7 +439,7 @@ int main(int argc,const char *argv[]) {@autoreleasepool{
             size_t newline;while((newline=pending.find('\n'))!=std::string::npos){auto line=pending.substr(0,newline);pending.erase(0,newline+1);
                 NSData *data=[NSData dataWithBytes:line.data() length:line.size()];id command=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];manager.command(command);}
             if(Dirty.exchange(false)||now-scan>std::chrono::milliseconds(500)){scan=now;try{manager.scan();}catch(const std::exception& e){manager.failed(e.what());}}
-            manager.drain();if(now-snapshot>std::chrono::milliseconds(100)){snapshot=now;manager.snapshot();}
+            manager.drain();if(now-snapshot>std::chrono::milliseconds(33)){snapshot=now;manager.snapshot();}
             if(CFRunLoopRunInMode(kCFRunLoopDefaultMode,.003,false)==kCFRunLoopRunFinished)std::this_thread::sleep_for(std::chrono::milliseconds(3));
         }}
         AudioObjectRemovePropertyListener(kAudioObjectSystemObject,&a,changed,nullptr);close(lockFD);return 0;

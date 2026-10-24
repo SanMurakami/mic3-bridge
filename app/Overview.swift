@@ -9,8 +9,8 @@ struct ReceiverOverview: View {
                 StatusDot(active: receiver.connected)
                 Text(receiver.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
                 Spacer()
-                Text(receiver.tc.enabled && receiver.tc.known ? "TC ON" : "TC OFF")
-                    .foregroundStyle(receiver.tc.enabled && receiver.tc.known ? Console.cyan : Console.muted)
+                Text(receiver.tc.enabled && receiver.tc.known ? (receiver.tc.output == 1 ? "USB TC×4" : "TC ON") : "TC OFF")
+                    .foregroundStyle(receiver.tc.known && receiver.tc.enabled && receiver.tc.output == 1 ? .orange : Console.cyan)
                 if receiver.recording { Text("● MAC").foregroundStyle(.red) }
             }.font(.system(size: 9, weight: .semibold, design: .monospaced)).padding(12)
             HStack(spacing: 1) {
@@ -44,15 +44,7 @@ struct CompactChannel: View {
             }.buttonStyle(.plain).popover(isPresented: $editing) {
                 LabelEditor(tx: tx, receiver: receiver, store: store)
             }
-            GeometryReader { p in
-                ZStack(alignment: .bottom) {
-                    Rectangle().fill(.black.opacity(0.5))
-                    Rectangle().fill(db >= -1 ? Color.red : db >= -9 ? Color.yellow : Color.green)
-                        .frame(height: p.size.height * (db + 60) / 60).animation(.linear(duration: 0.045), value: db)
-                    Path { path in for i in 1...12 { let y = p.size.height * Double(i) / 13; path.move(to: CGPoint(x: 0, y: y)); path.addLine(to: CGPoint(x: p.size.width, y: y)) } }.stroke(Console.strip, lineWidth: 2)
-                }
-            }.frame(width: 16, height: 90)
-            Text(amplitude > 0 ? String(format: "%.1f", db) : "−∞").font(.system(size: 11, design: .monospaced))
+            ProductionMeter(feed: store.feed(receiver.serial), channel: tx.index - 1)
             Text(tx.connected && tx.device_recording ? "● TX REC" : "TX STOP").foregroundStyle(tx.connected && tx.device_recording ? .red : Console.muted)
             HStack(spacing: 3) {
                 Image(systemName: tx.charging ? "battery.100percent.bolt" : "battery.100percent")

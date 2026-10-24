@@ -2,47 +2,17 @@ import SwiftUI
 import AppKit
 import AVFoundation
 
-struct Transmitter: Decodable, Identifiable, Equatable {
-    var id: Int { index }
-    let index: Int
-    let serial, label_key, label, noise_mode: String
-    let connected, charging, device_recording: Bool
-    let battery_code, storage_total, storage_remaining: Int
-}
-struct TimecodeState: Decodable, Equatable {
-    let known, enabled: Bool
-    let fps, output: Int
-    let timecode: String
-    let observed_host_seconds: Double?
-}
-struct Receiver: Decodable, Identifiable, Equatable {
-    var id: String { serial }
-    let serial, name, firmware, status, virtual_uid, usb_location, recording_path, error, control_message: String
-    let connected, recording, can_delete, control_busy, charging: Bool
-    let battery_code: Int
-    let tc: TimecodeState
-    let transmitters: [Transmitter]
-    let meters: [Double]
-    let waveform: [WaveBin]?
-    let recorded_seconds: Double
-    let dropped: UInt64
-}
-struct MatrixRoute: Codable, Equatable { var serial: String; var channel: Int }
-struct Snapshot: Decodable {
-    var receivers: [Receiver] = []
-    var host_seconds: Double?
-    var unidentified = 0
-    var error = ""
-    var bus_channels = 16
-    var bus_in_use = false
-    var routes: [MatrixRoute?] = []
-}
-
 @MainActor final class MicStore: ObservableObject {
     @Published var snapshot = Snapshot()
     @Published var failure = ""
     @Published var running = false
     var histories: [String: WaveHistory] = [:]
+    let clock = LiveClock()
+    private var feeds: [String: ReceiverFeed] = [:]
+    func feed(_ serial: String) -> ReceiverFeed {
+        if let existing = feeds[serial] { return existing }
+        let created = ReceiverFeed(); feeds[serial] = created; return created
+    }
     var timelineOrigin: Double?
     @Published var excluded: Set<String> = []
     var targets: [Receiver] { snapshot.receivers.filter { $0.connected && !excluded.contains($0.serial) } }
@@ -60,13 +30,15 @@ struct Snapshot: Decodable {
     private var latest = Snapshot()
     private var visibilityObserver: NSObjectProtocol?
     private var visible = true
+    private var perfStart = 0.0
+    private var perfFrames = 0, perfControls = 0
     init() {
         folder = UserDefaults.standard.url(forKey: "recordingFolder") ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Music/DJI Mic Recordings", isDirectory: true)
         visibilityObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeOcclusionStateNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.visible = NSApplication.shared.occlusionState.contains(.visible)
-                if self.visible { self.snapshot = self.latest }
+                if self.visible { self.snapshot = self.latest; self.perfStart = 0 }
             }
         }
     }
@@ -84,19 +56,28 @@ struct Snapshot: Decodable {
         let child = Process(), outgoing = Pipe(), incoming = Pipe(), errors = Pipe()
         child.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/dji-mic-bridge")
         child.standardInput = outgoing; child.standardOutput = incoming; child.standardError = errors
-        // 受信と JSON decode は background。UI への反映だけ MainActor、最大 10Hz。
-        let reader = SnapshotReader { [weak self] result in
-            Task { @MainActor in
-                guard let self else { return }
-                if self.timelineOrigin == nil { self.timelineOrigin = result.receivers.compactMap { $0.waveform?.first?.time }.min() }
-                for r in result.receivers { self.histories[r.serial, default: WaveHistory()].append(r, now: result.host_seconds ?? 0) }
-                let serials = Set(result.receivers.map(\.serial)); self.histories = self.histories.filter { serials.contains($0.key) }
-                self.latest = result
-                // 隠れたウィンドウにメーターの再描画を要求しない。メニューの台数だけ追従。
-                if self.visible || self.snapshot.receivers.map(\.connected) != result.receivers.map(\.connected) || self.snapshot.receivers.map(\.serial) != result.receivers.map(\.serial) {
-                    self.snapshot = result
+        // 受信と JSON decode は background。UI への反映だけ MainActor、約30Hz。
+        let reader = SnapshotReader { [weak self] result, history in
+            guard let self, self.running else { return }
+            self.histories = history
+            if self.timelineOrigin == nil { self.timelineOrigin = history.values.compactMap { $0.bins.first?.time }.min() }
+            let now = result.host_seconds ?? 0
+            let serials = Set(result.receivers.map(\.serial)); self.feeds = self.feeds.filter { serials.contains($0.key) }
+            if self.visible {
+                for r in result.receivers { self.feed(r.serial).update(r, now: now) }
+                self.clock.now = now
+            }
+            if self.visible && !self.snapshot.sameControls(as: result) { self.snapshot = result; self.perfControls += 1 }
+            else if self.snapshot.receivers.map(\.connected) != result.receivers.map(\.connected) || self.snapshot.receivers.map(\.serial) != result.receivers.map(\.serial) { self.snapshot = result }
+            if self.visible {
+                if self.perfStart == 0 { self.perfStart = now; self.perfFrames = 0; self.perfControls = 0 }
+                self.perfFrames += 1
+                if now - self.perfStart >= 10 {
+                    NSLog("UI配送 %.1fHz / 制御画面更新 %d回 / %.1f秒", Double(self.perfFrames) / (now - self.perfStart), self.perfControls, now - self.perfStart)
+                    self.perfStart = now; self.perfFrames = 0; self.perfControls = 0
                 }
             }
+            self.latest = result
         }
         incoming.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
@@ -144,18 +125,33 @@ struct Snapshot: Decodable {
 }
 // FileHandle の callback は直列処理し、分割された UTF-8 / JSON 行を保持する。
 final class SnapshotReader: @unchecked Sendable {
-    private let lock = NSLock()
+    private let lock = NSLock(), deliveryLock = NSLock()
     private var pending = Data()
-    private let receiveSnapshot: @Sendable (Snapshot) -> Void
-    init(_ callback: @escaping @Sendable (Snapshot) -> Void) { receiveSnapshot = callback }
+    private var histories: [String: WaveHistory] = [:]
+    private var delivery: (Snapshot, [String: WaveHistory])?
+    private var scheduled = false
+    private let receiveSnapshot: @MainActor @Sendable (Snapshot, [String: WaveHistory]) -> Void
+    init(_ callback: @escaping @MainActor @Sendable (Snapshot, [String: WaveHistory]) -> Void) { receiveSnapshot = callback }
     func receive(_ data: Data) {
         lock.lock(); defer { lock.unlock() }
         pending.append(data)
         while let end = pending.firstIndex(of: 10) {
             let line = pending[..<end]; pending.removeSubrange(...end)
-            if let value = try? JSONDecoder().decode(Snapshot.self, from: line) { receiveSnapshot(value) }
+            if let value = try? JSONDecoder().decode(Snapshot.self, from: line) {
+                let now = value.host_seconds ?? 0
+                for r in value.receivers { histories[r.serial, default: WaveHistory()].append(r, now: now) }
+                let serials = Set(value.receivers.map(\.serial)); histories = histories.filter { serials.contains($0.key) }
+                deliveryLock.lock(); delivery = (value, histories); let enqueue = !scheduled; scheduled = true; deliveryLock.unlock()
+                if enqueue { Task { @MainActor [self] in
+                    if let value = takeDelivery() { receiveSnapshot(value.0, value.1) }
+                } }
+            }
         }
         if pending.count > 4_194_304 { pending.removeAll() }
+    }
+    private func takeDelivery() -> (Snapshot, [String: WaveHistory])? {
+        deliveryLock.lock(); defer { deliveryLock.unlock() }
+        let value = delivery; delivery = nil; scheduled = false; return value
     }
 }
 
@@ -198,37 +194,6 @@ struct StatusDot: View {
     var color = Color.green
     var body: some View { Circle().fill(active ? color : Console.muted.opacity(0.4)).frame(width: 6, height: 6) }
 }
-struct LevelMeter: View {
-    let amplitude: Double
-    let channel: Int
-    private var db: Double { amplitude > 0 ? max(-60, 20 * log10(amplitude)) : -60 }
-    var body: some View {
-        HStack(spacing: 7) {
-            VStack(spacing: 0) {
-                Text("0"); Spacer(); Text("−12"); Spacer(); Text("−24"); Spacer(); Text("−60")
-            }.font(.system(size: 8, design: .monospaced)).foregroundStyle(Console.muted).frame(width: 22)
-            GeometryReader { proxy in
-                let height = proxy.size.height
-                ZStack(alignment: .bottom) {
-                    Rectangle().fill(Color.black.opacity(0.55))
-                    Rectangle().fill(db >= -1 ? Color.red : db >= -9 ? Color.yellow : Color.green)
-                        .frame(height: max(0, min(height, height * (db + 60) / 60)))
-                        .animation(.linear(duration: 0.045), value: db)
-                    VStack(spacing: 0) {
-                        ForEach(0..<25, id: \.self) { _ in
-                            Spacer(minLength: 0)
-                            Rectangle().fill(Console.strip).frame(height: 2)
-                        }
-                    }
-                }.clipShape(RoundedRectangle(cornerRadius: 2))
-            }.frame(width: 22)
-        }
-        .frame(height: 142)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("チャンネル \(channel) のピークレベル")
-        .accessibilityValue(amplitude > 0 ? String(format: "%.1f dBFS", db) : "無音")
-    }
-}
 struct MicrophoneStrip: View {
     let tx: Transmitter
     let receiver: Receiver
@@ -263,15 +228,14 @@ struct MicrophoneStrip: View {
                     LabelEditor(tx: tx, receiver: receiver, store: store)
                 }
             HStack(spacing: 16) {
-                LevelMeter(amplitude: amplitude, channel: tx.index)
+                ProductionMeter(feed: store.feed(receiver.serial), channel: tx.index - 1, height: 220, numeric: false)
                 VStack(alignment: .leading, spacing: 9) {
                     Text("PEAK").font(.system(size: 8, weight: .semibold)).tracking(1).foregroundStyle(Console.muted)
-                    Text(db > -90 ? String(format: "%.1f", db) : "−∞")
-                        .font(.system(size: 21, weight: .light, design: .monospaced)).foregroundStyle(db >= -1 ? .red : .white)
+                    MeterValue(feed: store.feed(receiver.serial), channel: tx.index - 1)
                     Text("dBFS").font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
                     Spacer()
                     HStack(spacing: 5) { StatusDot(active: tx.connected); Text(tx.connected ? "TX LINK" : "TX OFFLINE").font(.system(size: 8, weight: .semibold)).foregroundStyle(tx.connected ? .green : Console.muted) }
-                }.frame(height: 136)
+                }.frame(height: 214)
             }.frame(maxWidth: .infinity, alignment: .center)
             Rectangle().fill(Console.line).frame(height: 1)
             HStack {
@@ -351,7 +315,7 @@ struct ReceiverCard: View {
                 }
             }.background(Console.line).padding(.horizontal, 1)
             HStack(spacing: 12) {
-                Text(receiver.connected ? "USB ONLINE" : "OFFLINE · 入力を無音で維持")
+                Text(receiver.connected ? "USB ONLINE" : "OFFLINE")
                     .font(.system(size: 9, weight: .semibold, design: .monospaced)).foregroundStyle(receiver.connected ? .green : Console.muted)
                 Text(Console.batteryBars(receiver.battery_code).map { "RX BAT \($0)/6\(receiver.charging ? " ⚡" : "")" } ?? "RX BAT —")
                     .font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
@@ -359,8 +323,7 @@ struct ReceiverCard: View {
                 if receiver.control_busy { ProgressView().controlSize(.mini); Text("機器に適用中").font(.caption).foregroundStyle(Color(white: 0.78)) }
                 else if !receiver.control_message.isEmpty { Text(receiver.control_message).font(.system(size: 9)).foregroundStyle(Console.muted) }
                 if receiver.recording || receiver.recorded_seconds > 0 {
-                    Text(String(format: "%@ %02d:%02d", receiver.recording ? "● MAC REC" : "MAC", Int(receiver.recorded_seconds) / 60, Int(receiver.recorded_seconds) % 60))
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(receiver.recording ? .red : Console.muted)
+                    RecordingCounter(feed: store.feed(receiver.serial), recording: receiver.recording)
                 }
                 Button(receiver.recording ? "Mac 停止" : "Mac 録音") {
                     store.send(receiver.recording ? "stop" : "record", receiver: receiver, values: ["folder": store.folder.path])
@@ -431,7 +394,8 @@ struct MainView: View {
     @State private var page = "overview"
     @State private var tcEnabled = true
     @State private var fps = 3
-    @State private var outputMode = 1
+    @State private var outputMode = 3
+    @State private var confirmTCOnly = false
     @State private var recordingMode = "both"
     private var connected: Int { store.snapshot.receivers.filter(\.connected).count }
     var body: some View {
@@ -471,6 +435,10 @@ struct MainView: View {
         .frame(minWidth: 1060, minHeight: 730)
         .background(Console.background).foregroundStyle(Color(white: 0.88))
         .tint(Color(white: 0.65)).preferredColorScheme(.dark)
+        .alert("USB 音声を TC に切り替えます", isPresented: $confirmTCOnly) {
+            Button("キャンセル", role: .cancel) { }
+            Button("適用", action: applyTC)
+        } message: { Text("L-OUT では USB 全4chがTC信号になります。") }
     }
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 26) {
@@ -541,10 +509,10 @@ struct MainView: View {
                 }.frame(width: 112, alignment: .leading)
                 Toggle(tcEnabled ? "TC ON" : "TC OFF", isOn: $tcEnabled).toggleStyle(.switch).controlSize(.mini).tint(Console.cyan).foregroundStyle(Console.cyan)
                 Picker("FPS", selection: $fps) { ForEach(0..<Console.fps.count, id: \.self) { Text(Console.fps[$0]).tag($0) } }.frame(width: 142)
-                Picker("出力", selection: $outputMode) { ForEach(0..<Console.outputs.count, id: \.self) { Text(Console.outputs[$0]).tag($0) } }.frame(width: 155)
+                Picker("出力", selection: $outputMode) { ForEach(0..<Console.outputs.count, id: \.self) { Text(["L-IN · TC入力", "L-OUT · USB全ch TC", "A-OUT · CH1 TC", "N/A · 音声4ch"][$0]).tag($0) } }.frame(width: 200)
                 Spacer(minLength: 0)
                 Button("TC を一括適用") {
-                    store.bulk("tc_all", values: ["enabled": tcEnabled ? "1" : "0", "fps": String(fps), "output": String(outputMode)])
+                    if tcEnabled && outputMode == 1 { confirmTCOnly = true } else { applyTC() }
                 }.buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty || store.targetsBusy)
             }
             Rectangle().fill(Console.line).frame(height: 1)
@@ -562,6 +530,9 @@ struct MainView: View {
                     .buttonStyle(ConsoleButton(color: Color(white: 0.75))).disabled(store.targets.isEmpty)
             }
         }.padding(18).background(Console.panel).overlay(alignment: .bottom) { Rectangle().fill(Console.line).frame(height: 1) }
+    }
+    private func applyTC() {
+        store.bulk("tc_all", values: ["enabled": tcEnabled ? "1" : "0", "fps": String(fps), "output": String(outputMode)])
     }
     private func recording(start: Bool) {
         if recordingMode != "device" { store.bulk(start ? "record_all" : "stop_all", values: ["folder": store.folder.path]) }
