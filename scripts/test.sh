@@ -17,3 +17,6 @@ clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror -fsanitize=address,undefined
     -framework Foundation -framework AudioToolbox \
     "$repo_dir/tests/recorder-test.mm" -o "$repo_dir/.build/recorder-test"
 "$repo_dir/.build/recorder-test"
+clang++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
+    "$repo_dir/tests/telemetry-test.cpp" -o "$repo_dir/.build/telemetry-test"
+"$repo_dir/.build/telemetry-test"

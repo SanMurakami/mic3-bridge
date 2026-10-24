@@ -156,7 +156,7 @@ struct Session {
 };
 static NSString *ns(const std::string& value){return @(value.c_str());}
 struct Receiver {
-    std::string serial,name,firmware,status="未接続",error,path,previous;
+    std::string serial,name,firmware,status="未接続",error,path,previous,controlMessage;
     bool inUse=false,controlBusy=false;
     uint32_t location=0;uint64_t frames=0;double rate=48000;
     std::unique_ptr<Session> session;
@@ -179,13 +179,40 @@ class Manager {
     unsigned busChannels=16;
     NSMutableArray *routes=[NSMutableArray array];
     NSString *routingPath;
+    NSString *labelsPath;NSMutableDictionary *labels=[NSMutableDictionary dictionary];
     bool busInUse=false;
     std::set<AudioObjectID> runningListeners;
-    struct ControlJob {NSTask *task;NSPipe *output;std::string serial,mode;unsigned target;};
+    struct ControlJob {NSTask *task;NSPipe *output;std::string serial;bool started=false;};
     std::vector<ControlJob> controlJobs;
-    void pollControls(){for(auto it=controlJobs.begin();it!=controlJobs.end();){if(it->task.running){++it;continue;}NSData *data=[it->output.fileHandleForReading readDataToEndOfFile];
-        auto r=receivers.find(it->serial);if(r!=receivers.end()){r->second.controlBusy=false;if(it->task.terminationStatus!=0)r->second.error="ノイキャン変更を確認できませんでした。接続と送信機を確認してください。";
-            else if(![NSJSONSerialization JSONObjectWithData:data options:0 error:nil])r->second.error="ノイキャンの応答を読み取れませんでした。";else identities.observed(it->serial,it->target,it->mode);identities.refresh(it->serial);}it=controlJobs.erase(it);}}
+    void pollControls(){
+        if(controlJobs.empty())return;auto& job=controlJobs.front();auto r=receivers.find(job.serial);
+        if(!job.started){NSError *error=nil;if([job.task launchAndReturnError:&error]){job.started=true;return;}
+            if(r!=receivers.end())r->second.error=error.localizedDescription.UTF8String;controlJobs.erase(controlJobs.begin());if(r!=receivers.end())r->second.controlBusy=std::any_of(controlJobs.begin(),controlJobs.end(),[&](auto& pending){return pending.serial==r->first;});return;}
+        if(job.task.running)return;
+        NSData *data=[job.output.fileHandleForReading readDataToEndOfFile];id result=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if(r!=receivers.end()){r->second.controlBusy=false;bool ok=job.task.terminationStatus==0&&[result isKindOfClass:[NSDictionary class]]&&[result[@"success"] boolValue];
+            NSString *message=[result isKindOfClass:[NSDictionary class]]&&[result[@"message"] isKindOfClass:[NSString class]]?result[@"message"]:@"機器の応答を確認できませんでした。";
+            r->second.controlMessage=message.UTF8String;if(!ok)r->second.error=message.UTF8String;identities.refresh(job.serial);}
+        controlJobs.erase(controlJobs.begin());
+        if(r!=receivers.end())r->second.controlBusy=std::any_of(controlJobs.begin(),controlJobs.end(),[&](auto& pending){return pending.serial==r->first;});
+    }
+    void enqueue(Receiver& r,NSArray *arguments,bool priorityStop=false){if(!r.location||(r.controlBusy&&!priorityStop))throw std::runtime_error("接続を確認するか、前の機器操作の完了を待ってください。");
+        NSTask *task=[NSTask new];NSPipe *output=[NSPipe pipe];task.standardOutput=output;task.standardError=[NSFileHandle fileHandleWithNullDevice];
+        task.executableURL=[NSURL fileURLWithPath:[[[NSBundle mainBundle].executablePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"dji-mic-control"]];task.arguments=arguments;
+        r.controlBusy=true;r.controlMessage=priorityStop?"停止待ち":"適用待ち";
+        if(priorityStop){for(auto it=controlJobs.begin();it!=controlJobs.end();)if(it->serial==r.serial&&!it->started)it=controlJobs.erase(it);else++it;
+            auto position=controlJobs.begin();if(position!=controlJobs.end()&&position->started)++position;controlJobs.insert(position,{task,output,r.serial,false});}
+        else controlJobs.push_back({task,output,r.serial,false});
+    }
+    std::string labelKey(const Receiver& r,unsigned index,const dji::TransmitterState *tx=nullptr){auto slot=r.serial+":TX"+std::to_string(index);NSString *mapping=labels[ns("@slot:"+slot)];
+        if(tx&&!tx->serial.empty())return tx->serial;
+        return [mapping isKindOfClass:[NSString class]]&&dji::validSerial(mapping.UTF8String)?std::string(mapping.UTF8String):slot;}
+    void rememberTransmitters(const Receiver& r,const dji::Telemetry& state){bool changed=false;
+        for(auto& [index,tx]:state.transmitters){if(tx.serial.empty())continue;auto slot=r.serial+":TX"+std::to_string(index);NSString *key=ns("@slot:"+slot);
+            if(![labels[key] isEqual:ns(tx.serial)]){labels[key]=ns(tx.serial);if(!labels[ns(tx.serial)]&&labels[ns(slot)])labels[ns(tx.serial)]=labels[ns(slot)];changed=true;}}
+        if(changed)try{saveLabels();}catch(const std::exception& e){commandError=e.what();}}
+
+    void saveLabels(){NSError *error=nil;NSData *data=[NSJSONSerialization dataWithJSONObject:labels options:NSJSONWritingPrettyPrinted error:&error];if(!data||![data writeToFile:labelsPath options:NSDataWritingAtomic error:&error])throw std::runtime_error(error.localizedDescription.UTF8String);}
 
     void saveRouting(){NSError *error=nil;NSData *data=[NSJSONSerialization dataWithJSONObject:@{@"channels":@(busChannels),@"routes":routes} options:NSJSONWritingPrettyPrinted error:&error];
         if(!data||![data writeToFile:routingPath options:NSDataWritingAtomic error:&error])throw std::runtime_error(error.localizedDescription.UTF8String);}
@@ -211,6 +238,11 @@ class Manager {
 public:
     Manager(NSString *path):configPath(path){
         routingPath=[[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"routing.json"];
+        labelsPath=[[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"labels.json"];
+        if([[NSFileManager defaultManager] fileExistsAtPath:labelsPath]){id saved=[NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:labelsPath] options:0 error:nil];
+            if(![saved isKindOfClass:[NSDictionary class]])throw std::runtime_error("labels.json の形式が不正です。元ファイルを保護して終了します。");
+            for(id key in saved)if(![key isKindOfClass:[NSString class]]||![saved[key] isKindOfClass:[NSString class]])throw std::runtime_error("labels.json のラベルが不正です。");labels=[saved mutableCopy];}
+
         for(unsigned i=0;i<64;i++)[routes addObject:NSNull.null];
         if([[NSFileManager defaultManager] fileExistsAtPath:routingPath]){NSData *data=[NSData dataWithContentsOfFile:routingPath];id config=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:nil]:nil;
             if(![config isKindOfClass:[NSDictionary class]]||![config[@"channels"] isKindOfClass:[NSNumber class]])throw std::runtime_error("routing.json の形式が不正です。");
@@ -282,6 +314,19 @@ public:
     void command(NSDictionary *command){
         if(![command isKindOfClass:[NSDictionary class]])return;
         if([command[@"op"] isEqual:@"bus_channels"]||[command[@"op"] isEqual:@"route"]){routingCommand(command);return;}
+        NSString *bulkOp=command[@"op"];
+        if([@[@"record_all",@"stop_all",@"device_record_all",@"device_stop_all",@"tc_all",@"refresh_all"] containsObject:bulkOp]){
+            NSString *single=[bulkOp isEqual:@"record_all"]?@"record":[bulkOp isEqual:@"stop_all"]?@"stop":[bulkOp isEqual:@"tc_all"]?@"tc":[bulkOp isEqual:@"refresh_all"]?@"refresh_controls":@"device_record";
+            NSString *selection=command[@"serials"];NSArray *selected=[selection isKindOfClass:[NSString class]]?[selection componentsSeparatedByString:@","]:nil;
+            NSMutableDictionary *values=[command mutableCopy];values[@"op"]=single;
+            if([bulkOp hasPrefix:@"device_"])values[@"enabled"]=[bulkOp isEqual:@"device_record_all"]?@"1":@"0";
+            // 操作開始時に接続対象を確定する。
+            for(auto& [serial,r]:receivers){if(selected&&![selected containsObject:ns(serial)])continue;if(!r.session&&![single isEqual:@"stop"])continue;
+                if([single isEqual:@"record"]&&r.session&&r.session->recorder)continue;
+                if([single isEqual:@"device_record"]){auto status=identities.status(serial);if(status.known&&status.transmitters.empty()){r.error.clear();r.controlMessage="本体録音: 接続中の送信機なし・スキップ";continue;}}
+                values[@"serial"]=ns(serial);this->command(values);}
+            return;
+        }
         if(![command[@"serial"] isKindOfClass:[NSString class]])return;
         auto it=receivers.find([command[@"serial"] UTF8String]);if(it==receivers.end())return;auto& r=it->second;
         r.error.clear();
@@ -292,14 +337,23 @@ public:
                 for(auto& [serial,other]:receivers)if(serial!=r.serial&&other.name==name.UTF8String)throw std::runtime_error("他のレシーバーと異なる名前にしてください。");
                 auto old=r.name;r.name=name.UTF8String;try{save();}catch(...){r.name=old;throw;}configDirty=true;Dirty=true;
             }else if([op isEqual:@"refresh_controls"]){identities.refresh(r.serial);
+            }else if([op isEqual:@"label"]){
+                NSString *label=command[@"label"],*key=command[@"label_key"];
+                if(![key isKindOfClass:[NSString class]]||![label isKindOfClass:[NSString class]]||label.length>80||[label rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location!=NSNotFound)throw std::runtime_error("人物ラベルは80文字以内で入力してください。");
+                auto state=identities.status(r.serial);bool allowed=false;for(unsigned index=1;index<=4;index++){auto tx=state.transmitters.find(index);if([key isEqual:ns(labelKey(r,index,tx==state.transmitters.end()?nullptr:&tx->second))])allowed=true;}
+                if(!allowed)throw std::runtime_error("マイクの識別情報を更新してからラベルを保存してください。");
+                id old=labels[key];labels[key]=[label stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];try{saveLabels();}catch(...){if(old)labels[key]=old;else[labels removeObjectForKey:key];throw;}
+            }else if([op isEqual:@"tc"]){
+                auto valid=[](id value,int maximum){if(![value isKindOfClass:[NSString class]])return false;NSString *v=value;return v.length==1&&[v characterAtIndex:0]>='0'&&[v characterAtIndex:0]<='0'+maximum;};
+                if(!valid(command[@"enabled"],1)||!valid(command[@"fps"],7)||!valid(command[@"output"],3))throw std::runtime_error("TC 設定が不正です。");
+                enqueue(r,@[@"--tc",ns(r.serial),command[@"enabled"],command[@"fps"],command[@"output"]]);
+            }else if([op isEqual:@"device_record"]){
+                NSString *enabled=command[@"enabled"];if(![enabled isKindOfClass:[NSString class]]||(![enabled isEqual:@"0"]&&![enabled isEqual:@"1"]))throw std::runtime_error("録音操作が不正です。");
+                enqueue(r,@[@"--record",ns(r.serial),enabled],[enabled isEqual:@"0"]);
             }else if([op isEqual:@"noise"]){
-                if(!r.location||r.controlBusy)throw std::runtime_error("接続を確認するか、操作の完了を待ってください。");
                 NSString *mode=command[@"mode"];unsigned target=[command[@"target"] intValue];auto states=identities.controls(r.serial);
                 if(![mode isKindOfClass:[NSString class]]||(![mode isEqual:@"none"]&&![mode isEqual:@"basic"]&&![mode isEqual:@"strong"])||!states.count(target))throw std::runtime_error("送信機の状態を更新してから操作してください。");
-                NSTask *task=[NSTask new];NSPipe *output=[NSPipe pipe];task.standardOutput=output;task.standardError=[NSFileHandle fileHandleWithNullDevice];
-                task.executableURL=[NSURL fileURLWithPath:[[[NSBundle mainBundle].executablePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"dji-mic-control"]];
-                task.arguments=@[@"--set",ns(r.serial),[NSString stringWithFormat:@"%u",target],mode];NSError *error=nil;
-                if(![task launchAndReturnError:&error])throw std::runtime_error(error.localizedDescription.UTF8String);r.controlBusy=true;controlJobs.push_back({task,output,r.serial,std::string(mode.UTF8String),target});
+                enqueue(r,@[@"--set",ns(r.serial),[NSString stringWithFormat:@"%u",target],mode]);
             }else if([op isEqual:@"delete"]){
                 if(r.session||r.location)throw std::runtime_error("レシーバーを USB から抜いてから登録を削除してください。");
                 if(r.inUse)throw std::runtime_error("他のソフトがこの入力を使用中です。USB を抜いても入力と4chの無音を維持します。使用を終了してから削除してください。");
@@ -310,12 +364,17 @@ public:
                 auto node=receivers.extract(it);try{save();}catch(...){receivers.insert(std::move(node));configDirty=true;throw;}
                 configDirty=true;Dirty=true;return;
             }else if([op isEqual:@"record"]){
-                if(!r.session)throw std::runtime_error("接続中のレシーバーで録音してください。");
+                if(!r.session)throw std::runtime_error("接続中のレシーバーで録音してください。");if(r.session->recorder)return;
                 NSString *folder=command[@"folder"];if(![folder isKindOfClass:[NSString class]]||!folder.isAbsolutePath)throw std::runtime_error("保存先フォルダーが必要です。");
                 NSError *error=nil;if(![[NSFileManager defaultManager] createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:&error])throw std::runtime_error(error.localizedDescription.UTF8String);
                 NSDateFormatter *date=[NSDateFormatter new];date.locale=[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];date.dateFormat=@"yyyyMMdd-HHmmss";
                 NSString *file=[NSString stringWithFormat:@"%@-%@-%@.caf",[date stringFromDate:NSDate.date],ns(r.serial),NSUUID.UUID.UUIDString];
                 r.session->record([[folder stringByAppendingPathComponent:file] fileSystemRepresentation]);
+                NSMutableArray *microphones=[NSMutableArray array];auto state=identities.status(r.serial);for(unsigned i=1;i<=4;i++){auto t=state.transmitters.find(i);auto key=labelKey(r,i,t==state.transmitters.end()?nullptr:&t->second);[microphones addObject:@{@"channel":@(i),@"label_key":ns(key),@"label":labels[ns(key)]?:@""}];}
+                NSDictionary *metadata=@{@"receiver_serial":ns(r.serial),@"receiver_name":ns(r.name),@"microphones":microphones,@"sample_rate":@(r.session->format.mSampleRate),@"channels":@4,@"note":@"チャンネルと送信機の対応はレシーバーの出力モードに従います。"};
+                NSError *metadataError=nil;NSData *json=[NSJSONSerialization dataWithJSONObject:metadata options:NSJSONWritingPrettyPrinted error:&metadataError];
+                if(!json||![json writeToFile:[[folder stringByAppendingPathComponent:file] stringByAppendingString:@".json"] options:NSDataWritingAtomic error:&metadataError])r.error="音声の録音中ですが、人物ラベルの記録ファイルを保存できませんでした。";
+
             }else if([op isEqual:@"stop"]){if(r.session)r.session->stopRecording();}
         }catch(const std::exception& e){r.error=e.what();}
     }
@@ -323,14 +382,19 @@ public:
         for(auto& [serial,r]:receivers){NSMutableArray *peaks=[NSMutableArray array];Session *s=r.session.get();for(unsigned c=0;c<4;c++){[peaks addObject:@(s?s->peaks[c]:0)];if(s)s->peaks[c]=0;}
             auto frames=s?s->recordedFrames:r.frames;double rate=s?s->format.mSampleRate:r.rate;std::string path=s?s->recordingPath:r.path;
             std::string error=s&&!s->recordingError.empty()?s->recordingError:r.error;
-            NSMutableArray *transmitters=[NSMutableArray array];for(auto& [index,mode]:identities.controls(serial))[transmitters addObject:@{@"index":@(index),@"noise_mode":ns(mode)}];
+            auto state=r.location?identities.status(serial):dji::Telemetry{};rememberTransmitters(r,state);
+            NSMutableArray *transmitters=[NSMutableArray array];for(unsigned index=1;index<=4;index++){
+                auto it=state.transmitters.find(index);bool live=it!=state.transmitters.end();const dji::TransmitterState *tx=live?&it->second:nullptr;auto key=labelKey(r,index,tx);NSString *label=labels[ns(key)]?:@"";
+                [transmitters addObject:@{@"index":@(index),@"serial":tx?ns(tx->serial):@"",@"label_key":ns(key),@"label":label,@"connected":@(live),@"noise_mode":tx?ns(tx->noise):@"unknown",@"battery_code":@(tx?tx->battery:-1),@"charging":@(tx&&tx->charging),@"device_recording":@(tx&&tx->recording),@"storage_total":@(tx?tx->total:-1),@"storage_remaining":@(tx?tx->remaining:-1)}];
+            }
+            NSDictionary *tc=@{@"known":@(state.known),@"enabled":@(state.tcEnabled),@"fps":@(state.fps),@"output":@(state.output),@"timecode":ns(state.timecode)};
             [rows addObject:@{@"serial":ns(serial),@"name":ns(r.name),@"firmware":ns(r.firmware),@"status":ns(r.status),@"connected":@(s!=nullptr),@"can_delete":@(!s&&!r.location&&!r.inUse),
                 @"source_id":@(s?s->source:0),@"virtual_id":@(s?s->target:0),@"virtual_uid":ns(r.uid()),@"usb_location":[NSString stringWithFormat:@"0x%08x",r.location],
-                @"transmitters":transmitters,@"control_busy":@(r.controlBusy),@"meters":peaks,@"recording":@(s&&s->recorder),@"recorded_seconds":@(frames/rate),@"recording_path":ns(path),@"error":ns(error),@"dropped":@(s?s->dropped.load():0)}];
+                @"transmitters":transmitters,@"tc":tc,@"control_message":ns(r.controlMessage),@"battery_code":@(state.battery),@"charging":@(state.charging),@"control_busy":@(r.controlBusy),@"meters":peaks,@"recording":@(s&&s->recorder),@"recorded_seconds":@(frames/rate),@"recording_path":ns(path),@"error":ns(error),@"dropped":@(s?s->dropped.load():0)}];
         }
         emit(@{@"receivers":rows,@"unidentified":@(unidentified),@"error":ns(globalError.empty()?commandError:globalError),@"bus_channels":@(busChannels),@"bus_in_use":@(busInUse),@"routes":routes});
     }
-    ~Manager(){for(auto id:runningListeners){auto a=addr(kAudioDevicePropertyDeviceIsRunningSomewhere);AudioObjectRemovePropertyListener(id,&a,changed,nullptr);}for(auto& [serial,r]:receivers)r.disconnect();for(auto& job:controlJobs)[job.task waitUntilExit];}
+    ~Manager(){for(auto id:runningListeners){auto a=addr(kAudioDevicePropertyDeviceIsRunningSomewhere);AudioObjectRemovePropertyListener(id,&a,changed,nullptr);}for(auto& [serial,r]:receivers)r.disconnect();for(auto& job:controlJobs)if(job.started)[job.task waitUntilExit];}
 };
 int main(int argc,const char *argv[]) {@autoreleasepool{
     try{
@@ -350,7 +414,7 @@ int main(int argc,const char *argv[]) {@autoreleasepool{
             size_t newline;while((newline=pending.find('\n'))!=std::string::npos){auto line=pending.substr(0,newline);pending.erase(0,newline+1);
                 NSData *data=[NSData dataWithBytes:line.data() length:line.size()];id command=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];manager.command(command);}
             if(Dirty.exchange(false)||now-scan>std::chrono::milliseconds(500)){scan=now;try{manager.scan();}catch(const std::exception& e){manager.failed(e.what());}}
-            manager.drain();if(now-snapshot>std::chrono::milliseconds(200)){snapshot=now;manager.snapshot();}
+            manager.drain();if(now-snapshot>std::chrono::milliseconds(100)){snapshot=now;manager.snapshot();}
             if(CFRunLoopRunInMode(kCFRunLoopDefaultMode,.003,false)==kCFRunLoopRunFinished)std::this_thread::sleep_for(std::chrono::milliseconds(3));
         }}
         AudioObjectRemovePropertyListener(kAudioObjectSystemObject,&a,changed,nullptr);close(lockFD);return 0;
