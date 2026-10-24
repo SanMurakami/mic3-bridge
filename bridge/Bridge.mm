@@ -16,6 +16,7 @@
 #include "Resolver.hpp"
 #include "USBIdentityMonitor.hpp"
 #include "Recorder.hpp"
+#include "Waveform.hpp"
 #include <fcntl.h>
 #include <cmath>
 #include "../driver/Protocol.h"
@@ -77,10 +78,11 @@ struct Session {
     double frequency;
     bool started=false;
     std::array<float,4> peaks{};
+    dji::Waveform waveform;
     std::unique_ptr<dji::Recorder> recorder;
     std::string recordingPath,recordingError;
     uint64_t recordedFrames=0;
-    void stopRecording(){if(recorder){recordedFrames=recorder->frames;auto error=recorder->close();if(error)recordingError="録音の終了処理エラー: "+std::to_string(error);recorder.reset();}}
+    void stopRecording(){if(recorder){waveform.flush();recordedFrames=recorder->frames;auto error=recorder->close();if(error)recordingError="録音の終了処理エラー: "+std::to_string(error);recorder.reset();}}
     void record(const std::string& path){stopRecording();recordingError.clear();recordedFrames=0;recorder=std::make_unique<dji::Recorder>(path,format.mSampleRate);recordingPath=path;}
 
     Session(AudioObjectID source,AudioObjectID target):source(source),target(target),frequency(hostFrequency()) {
@@ -139,7 +141,7 @@ struct Session {
             lastError=AudioObjectSetPropertyData(target,&a,0,nullptr,sizeof(payload),&payload);CFRelease(payload);
             if(lastError)Dirty=true;else sent+=p.frames;
             for(unsigned f=0;f<p.frames;f++)for(unsigned c=0;c<4;c++)if(std::isfinite(p.samples[f*4+c]))peaks[c]=std::max(peaks[c],std::abs(p.samples[f*4+c]));
-            if(recorder){try{recorder->append(p.samples,p.frames);recordedFrames=recorder->frames;}catch(const std::exception& e){recordingError=e.what();stopRecording();}}
+            if(recorder){try{recorder->append(p.samples,p.frames);recordedFrames=recorder->frames;waveform.append(p.samples,p.frames,p.hostTime/frequency,format.mSampleRate*p.rateScalar);}catch(const std::exception& e){recordingError=e.what();stopRecording();}}
 
             read.store(r+1,std::memory_order_release);
         }
@@ -213,6 +215,20 @@ class Manager {
         if(changed)try{saveLabels();}catch(const std::exception& e){commandError=e.what();}}
 
     void saveLabels(){NSError *error=nil;NSData *data=[NSJSONSerialization dataWithJSONObject:labels options:NSJSONWritingPrettyPrinted error:&error];if(!data||![data writeToFile:labelsPath options:NSDataWritingAtomic error:&error])throw std::runtime_error(error.localizedDescription.UTF8String);}
+
+    void recordLabelChange(NSArray *changes){
+        // microphonesを保持し、変更をlabel_eventsへ追記する。
+        for(auto& [serial,r]:receivers)if(r.session&&r.session->recorder){auto& session=*r.session;session.drain();
+            NSString *path=[ns(session.recordingPath) stringByAppendingString:@".json"];NSError *error=nil;
+            NSData *original=[NSData dataWithContentsOfFile:path];id raw=original?[NSJSONSerialization JSONObjectWithData:original options:NSJSONReadingMutableContainers error:&error]:nil;
+            if(![raw isKindOfClass:NSMutableDictionary.class]){r.error="録音は継続中ですが、人物アサインの履歴を保存できませんでした。";continue;}
+            NSMutableArray *events=raw[@"label_events"];if(![events isKindOfClass:NSMutableArray.class]){events=[NSMutableArray array];raw[@"label_events"]=events;}
+            auto tc=identities.status(serial);
+            [events addObject:@{@"host_seconds":@(mach_absolute_time()/hostFrequency()),@"recorded_frame":@(session.recordedFrames),@"timecode":ns(tc.timecode),@"tc_observed_host_seconds":@(tc.observedHostSeconds),@"changes":changes}];
+            NSData *data=[NSJSONSerialization dataWithJSONObject:raw options:NSJSONWritingPrettyPrinted error:&error];
+            if(!data||![data writeToFile:path options:NSDataWritingAtomic error:&error])r.error="録音は継続中ですが、人物アサインの履歴を保存できませんでした。";
+        }
+    }
 
     void saveRouting(){NSError *error=nil;NSData *data=[NSJSONSerialization dataWithJSONObject:@{@"channels":@(busChannels),@"routes":routes} options:NSJSONWritingPrettyPrinted error:&error];
         if(!data||![data writeToFile:routingPath options:NSDataWritingAtomic error:&error])throw std::runtime_error(error.localizedDescription.UTF8String);}
@@ -342,7 +358,15 @@ public:
                 if(![key isKindOfClass:[NSString class]]||![label isKindOfClass:[NSString class]]||label.length>80||[label rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location!=NSNotFound)throw std::runtime_error("人物ラベルは80文字以内で入力してください。");
                 auto state=identities.status(r.serial);bool allowed=false;for(unsigned index=1;index<=4;index++){auto tx=state.transmitters.find(index);if([key isEqual:ns(labelKey(r,index,tx==state.transmitters.end()?nullptr:&tx->second))])allowed=true;}
                 if(!allowed)throw std::runtime_error("マイクの識別情報を更新してからラベルを保存してください。");
-                id old=labels[key];labels[key]=[label stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];try{saveLabels();}catch(...){if(old)labels[key]=old;else[labels removeObjectForKey:key];throw;}
+                NSString *take=command[@"take_from"];if(take&&(![take isKindOfClass:NSString.class]||[take isEqual:key]||[take hasPrefix:@"@slot:"]))throw std::runtime_error("引き継ぎ元の指定が不正です。");
+                if(take){bool found=false;for(auto& [serial,other]:receivers){auto telemetry=identities.status(serial);for(unsigned i=1;i<=4;i++){auto tx=telemetry.transmitters.find(i);if([take isEqual:ns(labelKey(other,i,tx==telemetry.transmitters.end()?nullptr:&tx->second))])found=true;}}
+                    if(!found||![labels[take] length])throw std::runtime_error("引き継ぎ元のラベルが変更されました。選び直してください。");}
+                NSMutableDictionary *before=[labels mutableCopy];NSString *old=labels[key]?:@"";
+                labels[key]=take?labels[take]:[label stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];if(take)labels[take]=old;
+                try{saveLabels();}catch(...){labels=before;throw;}
+                NSMutableArray *changes=[NSMutableArray arrayWithObject:@{@"label_key":key,@"before":old,@"after":labels[key]}];
+                if(take)[changes addObject:@{@"label_key":take,@"before":before[take]?:@"",@"after":labels[take]}];
+                recordLabelChange(changes);
             }else if([op isEqual:@"tc"]){
                 auto valid=[](id value,int maximum){if(![value isKindOfClass:[NSString class]])return false;NSString *v=value;return v.length==1&&[v characterAtIndex:0]>='0'&&[v characterAtIndex:0]<='0'+maximum;};
                 if(!valid(command[@"enabled"],1)||!valid(command[@"fps"],7)||!valid(command[@"output"],3))throw std::runtime_error("TC 設定が不正です。");
@@ -371,7 +395,7 @@ public:
                 NSString *file=[NSString stringWithFormat:@"%@-%@-%@.caf",[date stringFromDate:NSDate.date],ns(r.serial),NSUUID.UUID.UUIDString];
                 r.session->record([[folder stringByAppendingPathComponent:file] fileSystemRepresentation]);
                 NSMutableArray *microphones=[NSMutableArray array];auto state=identities.status(r.serial);for(unsigned i=1;i<=4;i++){auto t=state.transmitters.find(i);auto key=labelKey(r,i,t==state.transmitters.end()?nullptr:&t->second);[microphones addObject:@{@"channel":@(i),@"label_key":ns(key),@"label":labels[ns(key)]?:@""}];}
-                NSDictionary *metadata=@{@"receiver_serial":ns(r.serial),@"receiver_name":ns(r.name),@"microphones":microphones,@"sample_rate":@(r.session->format.mSampleRate),@"channels":@4,@"note":@"チャンネルと送信機の対応はレシーバーの出力モードに従います。"};
+                NSDictionary *metadata=@{@"tc_at_start":@{@"known":@(state.known),@"enabled":@(state.tcEnabled),@"fps":@(state.fps),@"timecode":ns(state.timecode),@"observed_host_seconds":@(state.observedHostSeconds)},@"record_command_host_seconds":@(mach_absolute_time()/hostFrequency()),@"receiver_serial":ns(r.serial),@"receiver_name":ns(r.name),@"microphones":microphones,@"label_events":@[],@"sample_rate":@(r.session->format.mSampleRate),@"channels":@4,@"note":@"チャンネルと送信機の対応はレシーバーの出力モードに従います。"};
                 NSError *metadataError=nil;NSData *json=[NSJSONSerialization dataWithJSONObject:metadata options:NSJSONWritingPrettyPrinted error:&metadataError];
                 if(!json||![json writeToFile:[[folder stringByAppendingPathComponent:file] stringByAppendingString:@".json"] options:NSDataWritingAtomic error:&metadataError])r.error="音声の録音中ですが、人物ラベルの記録ファイルを保存できませんでした。";
 
@@ -387,12 +411,13 @@ public:
                 auto it=state.transmitters.find(index);bool live=it!=state.transmitters.end();const dji::TransmitterState *tx=live?&it->second:nullptr;auto key=labelKey(r,index,tx);NSString *label=labels[ns(key)]?:@"";
                 [transmitters addObject:@{@"index":@(index),@"serial":tx?ns(tx->serial):@"",@"label_key":ns(key),@"label":label,@"connected":@(live),@"noise_mode":tx?ns(tx->noise):@"unknown",@"battery_code":@(tx?tx->battery:-1),@"charging":@(tx&&tx->charging),@"device_recording":@(tx&&tx->recording),@"storage_total":@(tx?tx->total:-1),@"storage_remaining":@(tx?tx->remaining:-1)}];
             }
-            NSDictionary *tc=@{@"known":@(state.known),@"enabled":@(state.tcEnabled),@"fps":@(state.fps),@"output":@(state.output),@"timecode":ns(state.timecode)};
+            NSMutableArray *wave=[NSMutableArray array];if(s)for(auto& bin:s->waveform.take()){NSMutableArray *low=[NSMutableArray array],*high=[NSMutableArray array];for(unsigned c=0;c<4;c++){[low addObject:@(bin.low[c])];[high addObject:@(bin.high[c])];}[wave addObject:@{@"time":@(bin.time),@"duration":@(bin.duration),@"low":low,@"high":high}];}
+            NSDictionary *tc=@{@"observed_host_seconds":@(state.observedHostSeconds),@"known":@(state.known),@"enabled":@(state.tcEnabled),@"fps":@(state.fps),@"output":@(state.output),@"timecode":ns(state.timecode)};
             [rows addObject:@{@"serial":ns(serial),@"name":ns(r.name),@"firmware":ns(r.firmware),@"status":ns(r.status),@"connected":@(s!=nullptr),@"can_delete":@(!s&&!r.location&&!r.inUse),
                 @"source_id":@(s?s->source:0),@"virtual_id":@(s?s->target:0),@"virtual_uid":ns(r.uid()),@"usb_location":[NSString stringWithFormat:@"0x%08x",r.location],
-                @"transmitters":transmitters,@"tc":tc,@"control_message":ns(r.controlMessage),@"battery_code":@(state.battery),@"charging":@(state.charging),@"control_busy":@(r.controlBusy),@"meters":peaks,@"recording":@(s&&s->recorder),@"recorded_seconds":@(frames/rate),@"recording_path":ns(path),@"error":ns(error),@"dropped":@(s?s->dropped.load():0)}];
+                @"waveform":wave,@"transmitters":transmitters,@"tc":tc,@"control_message":ns(r.controlMessage),@"battery_code":@(state.battery),@"charging":@(state.charging),@"control_busy":@(r.controlBusy),@"meters":peaks,@"recording":@(s&&s->recorder),@"recorded_seconds":@(frames/rate),@"recording_path":ns(path),@"error":ns(error),@"dropped":@(s?s->dropped.load():0)}];
         }
-        emit(@{@"receivers":rows,@"unidentified":@(unidentified),@"error":ns(globalError.empty()?commandError:globalError),@"bus_channels":@(busChannels),@"bus_in_use":@(busInUse),@"routes":routes});
+        emit(@{@"host_seconds":@(mach_absolute_time()/hostFrequency()),@"receivers":rows,@"unidentified":@(unidentified),@"error":ns(globalError.empty()?commandError:globalError),@"bus_channels":@(busChannels),@"bus_in_use":@(busInUse),@"routes":routes});
     }
     ~Manager(){for(auto id:runningListeners){auto a=addr(kAudioDevicePropertyDeviceIsRunningSomewhere);AudioObjectRemovePropertyListener(id,&a,changed,nullptr);}for(auto& [serial,r]:receivers)r.disconnect();for(auto& job:controlJobs)if(job.started)[job.task waitUntilExit];}
 };

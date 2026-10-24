@@ -20,3 +20,8 @@ clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Werror -fsanitize=address,undefined
 clang++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
     "$repo_dir/tests/telemetry-test.cpp" -o "$repo_dir/.build/telemetry-test"
 "$repo_dir/.build/telemetry-test"
+clang++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
+    "$repo_dir/tests/waveform-test.cpp" -o "$repo_dir/.build/waveform-test"
+"$repo_dir/.build/waveform-test"
+swiftc -O -warnings-as-errors "$repo_dir/app/TimelineData.swift" "$repo_dir/tests/timeline-test.swift" -o "$repo_dir/.build/timeline-test"
+"$repo_dir/.build/timeline-test"

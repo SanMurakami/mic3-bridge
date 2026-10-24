@@ -8,6 +8,7 @@ struct TransmitterState {
     int battery=-1,total=-1,remaining=-1;bool charging=false,recording=false;
 };
 struct Telemetry {
+    double observedHostSeconds=0;
     bool known=false,tcEnabled=false,allRecording=false,charging=false;
     int fps=-1,output=-1,battery=-1;
     std::string timecode;

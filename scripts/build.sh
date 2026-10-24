@@ -18,7 +18,7 @@ clang++ -std=c++17 -O2 -fobjc-arc -Wall -Wextra -Werror \
 clang++ -std=c++17 -O2 -fobjc-arc -Wall -Wextra -Werror -framework Foundation -framework IOKit -framework IOUSBHost \
     "$repo_dir/bridge/MicControl.mm" -o "$app_dir/MacOS/dji-mic-control"
 swiftc -O -parse-as-library -warnings-as-errors -framework SwiftUI -framework AppKit -framework AVFoundation \
-    "$repo_dir/app/DJIMicApp.swift" -o "$app_dir/MacOS/DJIMicBridge"
+    "$repo_dir/app/"*.swift -o "$app_dir/MacOS/DJIMicBridge"
 cp "$repo_dir/packaging/Bridge-Info.plist" "$app_dir/Info.plist"
 codesign --force --sign - "$build_dir/DJIMicInputs.driver"
 codesign --force --sign - "$app_dir/MacOS/dji-mic-bridge"

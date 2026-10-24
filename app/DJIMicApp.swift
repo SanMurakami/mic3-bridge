@@ -2,19 +2,35 @@ import SwiftUI
 import AppKit
 import AVFoundation
 
-struct Transmitter: Decodable, Identifiable, Equatable { var id: Int { index }; let index: Int; let noise_mode: String }
+struct Transmitter: Decodable, Identifiable, Equatable {
+    var id: Int { index }
+    let index: Int
+    let serial, label_key, label, noise_mode: String
+    let connected, charging, device_recording: Bool
+    let battery_code, storage_total, storage_remaining: Int
+}
+struct TimecodeState: Decodable, Equatable {
+    let known, enabled: Bool
+    let fps, output: Int
+    let timecode: String
+    let observed_host_seconds: Double?
+}
 struct Receiver: Decodable, Identifiable, Equatable {
     var id: String { serial }
-    let serial, name, firmware, status, virtual_uid, usb_location, recording_path, error: String
-    let connected, recording, can_delete, control_busy: Bool
+    let serial, name, firmware, status, virtual_uid, usb_location, recording_path, error, control_message: String
+    let connected, recording, can_delete, control_busy, charging: Bool
+    let battery_code: Int
+    let tc: TimecodeState
     let transmitters: [Transmitter]
     let meters: [Double]
+    let waveform: [WaveBin]?
     let recorded_seconds: Double
     let dropped: UInt64
 }
 struct MatrixRoute: Codable, Equatable { var serial: String; var channel: Int }
 struct Snapshot: Decodable {
     var receivers: [Receiver] = []
+    var host_seconds: Double?
     var unidentified = 0
     var error = ""
     var bus_channels = 16
@@ -26,6 +42,15 @@ struct Snapshot: Decodable {
     @Published var snapshot = Snapshot()
     @Published var failure = ""
     @Published var running = false
+    var histories: [String: WaveHistory] = [:]
+    var timelineOrigin: Double?
+    @Published var excluded: Set<String> = []
+    var targets: [Receiver] { snapshot.receivers.filter { $0.connected && !excluded.contains($0.serial) } }
+    var targetsBusy: Bool { targets.contains { $0.control_busy } }
+    func bulk(_ op: String, values: [String: String] = [:]) {
+        var command = values; command["serials"] = targets.map(\.serial).joined(separator: ",")
+        send(op, values: command)
+    }
     @Published var folder: URL
     private var process: Process?
     private var input: Pipe?
@@ -63,6 +88,9 @@ struct Snapshot: Decodable {
         let reader = SnapshotReader { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
+                if self.timelineOrigin == nil { self.timelineOrigin = result.receivers.compactMap { $0.waveform?.first?.time }.min() }
+                for r in result.receivers { self.histories[r.serial, default: WaveHistory()].append(r, now: result.host_seconds ?? 0) }
+                let serials = Set(result.receivers.map(\.serial)); self.histories = self.histories.filter { serials.contains($0.key) }
                 self.latest = result
                 // 隠れたウィンドウにメーターの再描画を要求しない。メニューの台数だけ追従。
                 if self.visible || self.snapshot.receivers.map(\.connected) != result.receivers.map(\.connected) || self.snapshot.receivers.map(\.serial) != result.receivers.map(\.serial) {
@@ -108,7 +136,7 @@ struct Snapshot: Decodable {
     func chooseFolder() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.canCreateDirectories = true; panel.allowsMultipleSelection = false; panel.directoryURL = folder
-        panel.message = "Mac 側の 4ch 録音を保存するフォルダー"; panel.prompt = "選択"
+        panel.prompt = "選択"
         if panel.runModal() == .OK, let chosen = panel.url {
             folder = chosen; UserDefaults.standard.set(chosen, forKey: "recordingFolder")
         }
@@ -131,188 +159,430 @@ final class SnapshotReader: @unchecked Sendable {
     }
 }
 
+enum Console {
+    static let cyan = Color(red: 0.35, green: 0.82, blue: 0.98)
+    static let background = Color(red: 0.055, green: 0.067, blue: 0.082)
+    static let panel = Color(red: 0.09, green: 0.105, blue: 0.125)
+    static let strip = Color(red: 0.068, green: 0.08, blue: 0.097)
+    static let line = Color.white.opacity(0.09)
+    static let muted = Color(red: 0.48, green: 0.54, blue: 0.61)
+    static let fps = ["23.98", "24", "25", "29.97", "29.97 DF", "30", "50", "60"]
+    static let outputs = ["L-IN", "L-OUT", "A-OUT", "N/A"]
+    static func batteryBars(_ code: Int) -> Int? { (1...7).contains(code) ? 7 - code : nil }
+    static func fpsName(_ value: Int) -> String { fps.indices.contains(value) ? fps[value] : "—" }
+    static func outputName(_ value: Int) -> String { outputs.indices.contains(value) ? outputs[value] : "—" }
+}
+struct ConsoleButton: ButtonStyle {
+    var active = false
+    var color = Color(white: 0.74)
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.font(.system(size: 11, weight: .semibold)).padding(.horizontal, 12).padding(.vertical, 9)
+            .foregroundStyle(active ? Color.black : color)
+            .background(active ? color : color.opacity(configuration.isPressed ? 0.22 : 0.08), in: RoundedRectangle(cornerRadius: 4))
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(color.opacity(0.3)))
+            .opacity(configuration.isPressed ? 0.8 : 1)
+    }
+}
+struct Readout: View {
+    let title, value: String
+    var color: Color = Color(white: 0.85)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.system(size: 9, weight: .semibold)).tracking(1.4).foregroundStyle(Console.muted)
+            Text(value).font(.system(size: 15, weight: .medium, design: .monospaced)).foregroundStyle(color)
+        }
+    }
+}
+struct StatusDot: View {
+    var active: Bool
+    var color = Color.green
+    var body: some View { Circle().fill(active ? color : Console.muted.opacity(0.4)).frame(width: 6, height: 6) }
+}
+struct LevelMeter: View {
+    let amplitude: Double
+    let channel: Int
+    private var db: Double { amplitude > 0 ? max(-60, 20 * log10(amplitude)) : -60 }
+    var body: some View {
+        HStack(spacing: 7) {
+            VStack(spacing: 0) {
+                Text("0"); Spacer(); Text("−12"); Spacer(); Text("−24"); Spacer(); Text("−60")
+            }.font(.system(size: 8, design: .monospaced)).foregroundStyle(Console.muted).frame(width: 22)
+            GeometryReader { proxy in
+                let height = proxy.size.height
+                ZStack(alignment: .bottom) {
+                    Rectangle().fill(Color.black.opacity(0.55))
+                    Rectangle().fill(db >= -1 ? Color.red : db >= -9 ? Color.yellow : Color.green)
+                        .frame(height: max(0, min(height, height * (db + 60) / 60)))
+                        .animation(.linear(duration: 0.045), value: db)
+                    VStack(spacing: 0) {
+                        ForEach(0..<25, id: \.self) { _ in
+                            Spacer(minLength: 0)
+                            Rectangle().fill(Console.strip).frame(height: 2)
+                        }
+                    }
+                }.clipShape(RoundedRectangle(cornerRadius: 2))
+            }.frame(width: 22)
+        }
+        .frame(height: 142)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("チャンネル \(channel) のピークレベル")
+        .accessibilityValue(amplitude > 0 ? String(format: "%.1f dBFS", db) : "無音")
+    }
+}
+struct MicrophoneStrip: View {
+    let tx: Transmitter
+    let receiver: Receiver
+    let amplitude: Double
+    @ObservedObject var store: MicStore
+    @State private var editingLabel = false
+    @State private var editingKey = ""
+    @State private var draft = ""
+    private var db: Double { amplitude > 0 ? 20 * log10(amplitude) : -90 }
+    private var free: Double? {
+        guard tx.connected, tx.storage_total > 0, tx.storage_remaining >= 0, tx.storage_remaining <= tx.storage_total else { return nil }
+        return Double(tx.storage_remaining) / Double(tx.storage_total)
+    }
+    var body: some View {
+        VStack(spacing: 13) {
+            HStack {
+                Text(String(format: "%02d", tx.index)).font(.system(size: 19, weight: .light, design: .monospaced)).foregroundStyle(Color(white: 0.78))
+                Spacer()
+                Text(tx.device_recording && tx.connected ? "● REC" : "TX \(tx.index)")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(tx.device_recording && tx.connected ? .red : Console.muted)
+            }
+            Button {
+                draft = tx.label; editingKey = tx.label_key; editingLabel = true
+            } label: {
+                HStack(spacing: 4) {
+                    Text(tx.label.isEmpty ? "人物ラベルを追加" : tx.label).lineLimit(1)
+                    Spacer(minLength: 0)
+                    Image(systemName: "pencil").font(.system(size: 8))
+                }.font(.system(size: 11, weight: .medium)).foregroundStyle(tx.label.isEmpty ? Console.muted : Color.white)
+            }.buttonStyle(.plain)
+                .popover(isPresented: $editingLabel) {
+                    LabelEditor(tx: tx, receiver: receiver, store: store)
+                }
+            HStack(spacing: 16) {
+                LevelMeter(amplitude: amplitude, channel: tx.index)
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("PEAK").font(.system(size: 8, weight: .semibold)).tracking(1).foregroundStyle(Console.muted)
+                    Text(db > -90 ? String(format: "%.1f", db) : "−∞")
+                        .font(.system(size: 21, weight: .light, design: .monospaced)).foregroundStyle(db >= -1 ? .red : .white)
+                    Text("dBFS").font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
+                    Spacer()
+                    HStack(spacing: 5) { StatusDot(active: tx.connected); Text(tx.connected ? "TX LINK" : "TX OFFLINE").font(.system(size: 8, weight: .semibold)).foregroundStyle(tx.connected ? .green : Console.muted) }
+                }.frame(height: 136)
+            }.frame(maxWidth: .infinity, alignment: .center)
+            Rectangle().fill(Console.line).frame(height: 1)
+            HStack {
+                Text("BAT").font(.system(size: 9, weight: .semibold)).foregroundStyle(Console.muted)
+                Spacer()
+                if tx.charging && tx.connected { Image(systemName: "bolt.fill").foregroundStyle(Color(white: 0.78)) }
+                if tx.connected, let bars = Console.batteryBars(tx.battery_code) {
+                    HStack(spacing: 2) { ForEach(0..<6, id: \.self) { segment in
+                        RoundedRectangle(cornerRadius: 1).fill(segment < bars ? (bars <= 1 ? Color.orange : Color(white: 0.72)) : Color.white.opacity(0.1)).frame(width: 5, height: 10)
+                    } }
+                    Text("\(bars)/6").font(.system(size: 10, design: .monospaced))
+                } else { Text("—").font(.system(size: 10, design: .monospaced)) }
+            }
+            VStack(spacing: 5) {
+                HStack {
+                    Text("STORAGE").font(.system(size: 9, weight: .semibold)).foregroundStyle(Console.muted)
+                    Spacer()
+                    Text(free.map { String(format: "空き %.0f%%", $0 * 100) } ?? "—").font(.system(size: 10, design: .monospaced))
+                }
+                GeometryReader { p in
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(Color.white.opacity(0.07))
+                        if let free { Rectangle().fill(free < 0.1 ? Color.orange : Color.white.opacity(0.38)).frame(width: p.size.width * free) }
+                    }.clipShape(Capsule())
+                }.frame(height: 3)
+            }
+            Picker("ノイキャン TX \(tx.index)", selection: Binding(get: { tx.noise_mode }, set: {
+                store.send("noise", receiver: receiver, values: ["target": String(tx.index), "mode": $0])
+            })) {
+                Text("NC · NONE").tag("none"); Text("NC · BASIC").tag("basic"); Text("NC · STRONG").tag("strong")
+                if tx.noise_mode == "unknown" { Text("NC · —").tag("unknown") }
+            }.labelsHidden().controlSize(.small).disabled(!tx.connected || receiver.control_busy)
+            Text(tx.serial.isEmpty ? "CH \(tx.index) / 4" : tx.serial)
+                .font(.system(size: 8, design: .monospaced)).foregroundStyle(Console.muted).lineLimit(1).textSelection(.enabled)
+        }
+        .padding(14).frame(maxWidth: .infinity)
+        .background(Console.strip)
+
+    }
+    private func saveLabel() {
+        store.send("label", receiver: receiver, values: ["label_key": editingKey, "label": draft]); editingLabel = false
+    }
+}
 struct ReceiverCard: View {
     let receiver: Receiver
     @ObservedObject var store: MicStore
     @State private var editing = false
     @State private var draft = ""
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top) {
-                Image(systemName: "mic.and.signal.meter.fill").font(.title2).foregroundStyle(receiver.connected ? .green : .secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Toggle("一括操作の対象", isOn: Binding(get: { !store.excluded.contains(receiver.serial) }, set: {
+                    if $0 { store.excluded.remove(receiver.serial) } else { store.excluded.insert(receiver.serial) }
+                })).toggleStyle(.checkbox).labelsHidden().disabled(!receiver.connected)
+                StatusDot(active: receiver.connected)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(receiver.name).font(.headline).textSelection(.enabled)
-                    Text("S/N \(receiver.serial)  ·  \(receiver.firmware.isEmpty ? "FW 未確認" : receiver.firmware)")
-                        .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    Text(receiver.name).font(.system(size: 13, weight: .semibold))
+                    Text("RX / \(receiver.serial)   ·   FW \(receiver.firmware)").font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted).textSelection(.enabled)
                 }
                 Spacer()
-                Text(receiver.status).font(.caption).foregroundStyle(receiver.connected ? .green : .secondary)
-                Button("名前を変更", systemImage: "pencil") { draft = receiver.name; editing = true }
-                    .labelStyle(.iconOnly).help("各アプリに表示する入力名を変更")
-                Button("登録を削除", systemImage: "trash", role: .destructive) { store.send("delete", receiver: receiver) }
-                    .labelStyle(.iconOnly).disabled(!receiver.can_delete)
-                    .help(receiver.can_delete ? "一覧と各ソフトの仮想入力から登録を削除。録音ファイルは残ります。再接続すると新規登録します。" : "USB 未接続で、DAW などが入力を使っていないときに削除できます")
-            }
-            HStack(spacing: 18) {
-                ForEach(0..<4) { ch in
-                    VStack(alignment: .leading, spacing: 5) {
-                        let amplitude = ch < receiver.meters.count ? receiver.meters[ch] : 0
-                        let db = amplitude > 0 ? 20 * log10(amplitude) : -90
-                        HStack {
-                            Text("CH \(ch+1)").font(.caption).fontWeight(.medium)
-                            Spacer()
-                            Text(db > -90 ? String(format: "%.0f dB", db) : "−∞").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                        }
-                        ProgressView(value: min(1, max(0, (db+60)/60)))
-                            .tint(db >= -1 ? .red : .green)
-                            .accessibilityLabel("チャンネル \(ch+1) の入力レベル")
-                    }
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(!receiver.tc.known ? "—:—:—:—" : receiver.tc.enabled ? receiver.tc.timecode : "TC OFF")
+                        .font(.system(size: 18, weight: .medium, design: .monospaced)).foregroundStyle(receiver.tc.known ? Color(white: 0.82) : Console.muted)
+                    Text(receiver.tc.known ? "\(Console.fpsName(receiver.tc.fps)) fps · \(Console.outputName(receiver.tc.output))" : "TC 状態未取得")
+                        .font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
                 }
-            }
-            HStack {
-                Button(receiver.recording ? "録音を停止" : "Mac に 4ch 録音", systemImage: receiver.recording ? "stop.fill" : "record.circle") {
-                    store.send(receiver.recording ? "stop" : "record", receiver: receiver, values: ["folder": store.folder.path])
-                }
-                .disabled(!receiver.connected)
-                .tint(receiver.recording ? .red : .accentColor)
-                if receiver.recording || receiver.recorded_seconds > 0 {
-                    Text(String(format: "%@ %02d:%02d", receiver.recording ? "REC" : "保存済み", Int(receiver.recorded_seconds)/60, Int(receiver.recorded_seconds)%60))
-                        .font(.caption.monospacedDigit()).foregroundStyle(receiver.recording ? .red : .secondary)
-                }
-                Spacer()
-                if !receiver.recording_path.isEmpty {
-                    Button("ファイルを表示", systemImage: "folder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: receiver.recording_path)])
-                    }.font(.caption)
-                }
-                Text("4ch · 48 kHz 仮想入力").font(.caption).foregroundStyle(.secondary)
-            }
-            HStack {
-                Text("ノイキャン").font(.caption).foregroundStyle(.secondary)
+                Menu {
+                    Button("入力名を変更…") { draft = receiver.name; editing = true }
+                    Button("機器の状態を更新") { store.send("refresh_controls", receiver: receiver) }.disabled(!receiver.connected || receiver.control_busy)
+                    Divider()
+                    Button("登録を削除", role: .destructive) { store.send("delete", receiver: receiver) }.disabled(!receiver.can_delete)
+                } label: { Image(systemName: "ellipsis").frame(width: 24, height: 24) }.menuStyle(.borderlessButton).fixedSize()
+            }.padding(16)
+            HStack(spacing: 1) {
                 ForEach(receiver.transmitters) { tx in
-                    Picker("TX \(tx.index)", selection: Binding(get: { tx.noise_mode }, set: { mode in
-                        store.send("noise", receiver: receiver, values: ["target":String(tx.index),"mode":mode])
-                    })) { Text("NONE").tag("none");Text("BASIC").tag("basic");Text("STRONG").tag("strong");if tx.noise_mode == "unknown" { Text("未確認").tag("unknown") } }
-                    .frame(width: 165).disabled(receiver.control_busy || !receiver.connected)
+                    MicrophoneStrip(tx: tx, receiver: receiver, amplitude: tx.index <= receiver.meters.count ? receiver.meters[tx.index - 1] : 0, store: store)
                 }
+            }.background(Console.line).padding(.horizontal, 1)
+            HStack(spacing: 12) {
+                Text(receiver.connected ? "USB ONLINE" : "OFFLINE · 入力を無音で維持")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced)).foregroundStyle(receiver.connected ? .green : Console.muted)
+                Text(Console.batteryBars(receiver.battery_code).map { "RX BAT \($0)/6\(receiver.charging ? " ⚡" : "")" } ?? "RX BAT —")
+                    .font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
                 Spacer()
-                if receiver.control_busy { ProgressView().controlSize(.small) }
-                Button("状態を更新", systemImage: "arrow.clockwise") { store.send("refresh_controls", receiver: receiver) }.font(.caption).disabled(!receiver.connected || receiver.control_busy)
+                if receiver.control_busy { ProgressView().controlSize(.mini); Text("機器に適用中").font(.caption).foregroundStyle(Color(white: 0.78)) }
+                else if !receiver.control_message.isEmpty { Text(receiver.control_message).font(.system(size: 9)).foregroundStyle(Console.muted) }
+                if receiver.recording || receiver.recorded_seconds > 0 {
+                    Text(String(format: "%@ %02d:%02d", receiver.recording ? "● MAC REC" : "MAC", Int(receiver.recorded_seconds) / 60, Int(receiver.recorded_seconds) % 60))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(receiver.recording ? .red : Console.muted)
+                }
+                Button(receiver.recording ? "Mac 停止" : "Mac 録音") {
+                    store.send(receiver.recording ? "stop" : "record", receiver: receiver, values: ["folder": store.folder.path])
+                }.buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(Color(white: 0.78)).disabled(!receiver.connected && !receiver.recording)
+                if !receiver.recording_path.isEmpty {
+                    Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: receiver.recording_path)]) } label: { Image(systemName: "folder") }
+                        .buttonStyle(.plain).foregroundStyle(Console.muted)
+                }
+            }.padding(.horizontal, 16).padding(.vertical, 11)
+            if !receiver.error.isEmpty {
+                Label(receiver.error, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange).textSelection(.enabled).padding([.horizontal, .bottom], 14)
             }
-            if !receiver.error.isEmpty { Label(receiver.error, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
-            if receiver.dropped > 0 { Text("転送待ちの上限に達した音声ブロック: \(receiver.dropped)").font(.caption).foregroundStyle(.orange) }
+            if receiver.dropped > 0 { Text("転送待ち上限: \(receiver.dropped) blocks").font(.caption).foregroundStyle(.orange).padding(12) }
         }
-        .padding(18).background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
+        .background(Console.panel).clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Console.line))
         .sheet(isPresented: $editing) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("仮想入力の名前").font(.headline)
-                Text("各ソフトの入力一覧に表示されます。変更後に入力一覧を開き直してください。").font(.callout).foregroundStyle(.secondary)
                 TextField("名前", text: $draft).textFieldStyle(.roundedBorder)
-                HStack {
-                    Spacer(); Button("キャンセル", role: .cancel) { editing = false }.keyboardShortcut(.cancelAction)
-                    Button("保存") { store.send("rename", receiver: receiver, values: ["name": draft]); editing = false }
-                        .keyboardShortcut(.defaultAction).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }.padding(24).frame(width: 440)
+                HStack { Spacer(); Button("キャンセル") { editing = false }; Button("保存") {
+                    store.send("rename", receiver: receiver, values: ["name": draft]); editing = false
+                }.keyboardShortcut(.defaultAction).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+            }.padding(24).frame(width: 400)
         }
     }
 }
-
 struct MatrixView: View {
     @ObservedObject var store: MicStore
-    @State private var expanded = false
     var body: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("DJI Mic3 Matrix").font(.headline)
-                    Spacer()
-                    Picker("共通入力", selection: Binding(get: { store.snapshot.bus_channels }, set: { store.send("bus_channels", values: ["channels": String($0)]) })) {
-                        ForEach([4,8,16,32,64], id: \.self) { Text("\($0)ch").tag($0) }
-                    }.frame(width: 180).disabled(store.snapshot.bus_in_use)
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("ROUTING MATRIX").font(.system(size: 20, weight: .light)).tracking(2)
                 }
-                Text(store.snapshot.bus_in_use ? "DAW が使用中です。入力とチャンネル数を維持しています。" : "チャンネル数の変更は DAW の入力を停止してから行ってください。")
-                    .font(.caption).foregroundStyle(.secondary)
-                DisclosureGroup("チャンネルの割り当て", isExpanded: $expanded) {
-                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
-                        ForEach(0..<store.snapshot.bus_channels, id: \.self) { destination in
-                            let route = destination < store.snapshot.routes.count ? store.snapshot.routes[destination] : nil
-                            GridRow {
-                                Text("CH \(destination+1)").font(.callout.monospacedDigit()).frame(width: 52, alignment: .leading)
-                                Picker("入力元", selection: Binding(get: { route?.serial ?? "" }, set: { serial in
-                                    store.send("route", values: ["destination":String(destination+1),"source_serial":serial,"channel":String(route?.channel ?? 1)])
-                                })) {
-                                    Text("無音").tag("")
-                                    ForEach(store.snapshot.receivers) { r in Text("\(r.name)  [\(r.serial)]").tag(r.serial) }
-                                    if let route, !store.snapshot.receivers.contains(where: { $0.serial == route.serial }) {
-                                        Text("\(route.serial)（未登録）").tag(route.serial)
-                                    }
-                                }.labelsHidden().frame(maxWidth: .infinity)
-                                Picker("機器のチャンネル", selection: Binding(get: { route?.channel ?? 1 }, set: { channel in
-                                    store.send("route", values: ["destination":String(destination+1),"source_serial":route?.serial ?? "","channel":String(channel)])
-                                })) { ForEach(1...4,id: \.self) { Text("CH \($0)").tag($0) } }
-                                .labelsHidden().frame(width: 90).disabled(route == nil)
-                            }
-                        }
-                    }.padding(.top, 10)
+                Spacer()
+                Picker("共通入力", selection: Binding(get: { store.snapshot.bus_channels }, set: { store.send("bus_channels", values: ["channels": String($0)]) })) {
+                    ForEach([4,8,16,32,64], id: \.self) { Text("\($0) ch").tag($0) }
+                }.frame(width: 190).disabled(store.snapshot.bus_in_use)
+            }
+            HStack { Text("DESTINATION").frame(width: 100, alignment: .leading); Text("SOURCE RECEIVER"); Spacer(); Text("SOURCE CH").frame(width: 90) }
+                .font(.system(size: 9, weight: .semibold)).tracking(1).foregroundStyle(Console.muted)
+            LazyVStack(spacing: 1) {
+                ForEach(0..<store.snapshot.bus_channels, id: \.self) { destination in
+                    let route = destination < store.snapshot.routes.count ? store.snapshot.routes[destination] : nil
+                    HStack(spacing: 12) {
+                        Text(String(format: "IN %02d", destination + 1)).font(.system(size: 13, design: .monospaced)).foregroundStyle(Color(white: 0.78)).frame(width: 88, alignment: .leading)
+                        Picker("入力元 \(destination + 1)", selection: Binding(get: { route?.serial ?? "" }, set: { serial in
+                            store.send("route", values: ["destination": String(destination + 1), "source_serial": serial, "channel": String(route?.channel ?? 1)])
+                        })) {
+                            Text("無音").tag("")
+                            ForEach(store.snapshot.receivers) { r in Text("\(r.name)  /  \(r.serial)").tag(r.serial) }
+                            if let route, !store.snapshot.receivers.contains(where: { $0.serial == route.serial }) { Text("\(route.serial)（未登録）").tag(route.serial) }
+                        }.labelsHidden().frame(maxWidth: .infinity)
+                        Image(systemName: "arrow.left").font(.caption).foregroundStyle(Console.muted)
+                        Picker("入力 CH \(destination + 1)", selection: Binding(get: { route?.channel ?? 1 }, set: { channel in
+                            store.send("route", values: ["destination": String(destination + 1), "source_serial": route?.serial ?? "", "channel": String(channel)])
+                        })) { ForEach(1...4, id: \.self) { Text("CH \($0)").tag($0) } }
+                            .labelsHidden().frame(width: 90).disabled(route == nil)
+                    }.padding(12).background(destination % 2 == 0 ? Console.panel : Console.strip)
                 }
-                Text("割り当ては本体シリアルで保存します。抜き差しでは変更せず、未接続の入力元は無音になります。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }.padding(6)
+            }
         }
     }
 }
-
 struct MainView: View {
     @ObservedObject var store: MicStore
+    @State private var page = "overview"
+    @State private var tcEnabled = true
+    @State private var fps = 3
+    @State private var outputMode = 1
+    @State private var recordingMode = "both"
+    private var connected: Int { store.snapshot.receivers.filter(\.connected).count }
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("DJI Mic 3 Bridge").font(.largeTitle.bold())
-                    Text("レシーバー 1 台につき、名前を持つ 4ch 入力。").foregroundStyle(.secondary)
+        HStack(spacing: 0) {
+            sidebar
+            VStack(spacing: 0) {
+                header
+                if page != "routing" { transport }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 20) {
+                        if !store.failure.isEmpty { errorBanner(store.failure) }
+                        if !store.snapshot.error.isEmpty { errorBanner(store.snapshot.error) }
+                        if page == "routing" { MatrixView(store: store) }
+                        else if page == "timeline" { RecordingTimeline(store: store) }
+                        else if page == "overview" {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 360), spacing: 14)], spacing: 14) {
+                                ForEach(store.snapshot.receivers) { ReceiverOverview(receiver: $0, store: store) }
+                            }
+                        }
+                        else {
+                            HStack {
+                                Text("RECEIVER RACK").font(.system(size: 10, weight: .semibold)).tracking(2).foregroundStyle(Console.muted)
+                                Spacer()
+                                Text("4 CH / RX · 48 kHz").font(.system(size: 10, design: .monospaced)).foregroundStyle(Console.muted)
+                            }
+                            if store.snapshot.receivers.isEmpty {
+                                ContentUnavailableView("接続なし", systemImage: "cable.connector")
+                            }
+                            ForEach(store.snapshot.receivers) { ReceiverCard(receiver: $0, store: store) }
+                            if store.snapshot.unidentified > 0 { Text("\(store.snapshot.unidentified) 台の個体情報を確認中…").font(.caption).foregroundStyle(Console.muted) }
+                        }
+                    }.padding(24)
                 }
-                Spacer()
-                Text("\(store.snapshot.receivers.filter(\.connected).count) 台接続").font(.headline)
-            }.padding(24)
-            Divider()
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    if !store.failure.isEmpty { errorBanner(store.failure) }
-                    if !store.snapshot.error.isEmpty { errorBanner(store.snapshot.error) }
-                    if store.snapshot.unidentified > 0 {
-                        Label("\(store.snapshot.unidentified) 台の個体情報を確認しています…", systemImage: "usb.cable").foregroundStyle(.secondary)
-                    }
-                    if store.snapshot.receivers.isEmpty {
-                        ContentUnavailableView("レシーバーを接続", systemImage: "mic", description: Text("DJI Mic 3 を USB で接続すると自動登録します。ポートを変えても同じ個体の入力へ戻ります。"))
-                    }
-                    MatrixView(store: store)
-                    ForEach(store.snapshot.receivers) { receiver in ReceiverCard(receiver: receiver, store: store) }
-                    GroupBox("機器側の制御") {
-                        Text("ノイキャンは各 TX の NONE / BASIC / STRONG を変更できます。本体録音・TC の変更は解析中です。録音ボタンは Mac 側への保存です。")
-                            .font(.callout).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(6)
-                    }
-                }.padding(24)
+                footer
             }
-            Divider()
-            HStack {
-                Button("保存先…", systemImage: "folder") { store.chooseFolder() }
-                Text(store.folder.path).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(store.folder.path)
-                Spacer()
-                if !store.running { Button("音声サービスを再開") { Task { await store.start() } } }
-                Text("CAF · Float32 · 4ch").font(.caption).foregroundStyle(.secondary)
-            }.padding(14)
         }
-        .transaction { $0.animation = nil; $0.disablesAnimations = true }
-        .frame(minWidth: 740, minHeight: 480)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(minWidth: 1060, minHeight: 730)
+        .background(Console.background).foregroundStyle(Color(white: 0.88))
+        .tint(Color(white: 0.65)).preferredColorScheme(.dark)
     }
-    func errorBanner(_ message: String) -> some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange).textSelection(.enabled)
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) { Rectangle().fill(Console.cyan).frame(width: 3, height: 25); Text("MIC 3 BRIDGE").font(.system(size: 18, weight: .bold)).tracking(1) }
+            }.padding(.top, 10)
+            VStack(spacing: 5) {
+                nav("overview", "一覧", "square.grid.2x2")
+                nav("timeline", "タイムライン", "waveform.path")
+                nav("mixer", "受信・収録", "slider.vertical.3")
+                nav("routing", "ルーティング", "point.3.connected.trianglepath.dotted")
+            }
+            Rectangle().fill(Console.line).frame(height: 1)
+            ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("SESSION TARGETS").font(.system(size: 9, weight: .semibold)).tracking(1.5).foregroundStyle(Console.muted)
+                ForEach(store.snapshot.receivers) { r in
+                    Button {
+                        if store.excluded.contains(r.serial) { store.excluded.remove(r.serial) } else { store.excluded.insert(r.serial) }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: store.excluded.contains(r.serial) ? "square" : "checkmark.square.fill").foregroundStyle(r.connected ? Color(white: 0.75) : Console.muted)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(r.name).font(.system(size: 10)).lineLimit(1)
+                                Text(String(r.serial.suffix(6))).font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
+                            }
+                            Spacer(minLength: 0)
+                            StatusDot(active: r.connected)
+                        }
+                    }.buttonStyle(.plain).disabled(!r.connected)
+                }
+                Button("接続中をすべて選択") { store.excluded.removeAll() }.font(.system(size: 10)).foregroundStyle(Color(white: 0.78)).buttonStyle(.plain)
+            }
+            }.scrollIndicators(.hidden)
+            VStack(alignment: .leading, spacing: 14) {
+                Readout(title: "MATRIX INPUT", value: "\(store.snapshot.bus_channels) CHANNELS")
+                Text(store.snapshot.bus_in_use ? "● DAW ACTIVE" : "○ DAW IDLE").font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
+            }
+        }.padding(20).frame(width: 198).frame(maxHeight: .infinity).background(Console.strip)
+            .overlay(alignment: .trailing) { Rectangle().fill(Console.line).frame(width: 1) }
+    }
+    private func nav(_ id: String, _ title: String, _ icon: String) -> some View {
+        Button { page = id } label: {
+            HStack(spacing: 10) { Image(systemName: icon).frame(width: 18); Text(title).font(.system(size: 12, weight: .medium)); Spacer() }
+                .foregroundStyle(page == id ? Color(white: 0.9) : Console.muted).padding(12)
+                .background(page == id ? Color.white.opacity(0.04) : .clear, in: RoundedRectangle(cornerRadius: 4))
+                .overlay(alignment: .leading) { if page == id { Rectangle().fill(Console.cyan).frame(width: 2, height: 18) } }
+        }.buttonStyle(.plain)
+    }
+    private var header: some View {
+        HStack(spacing: 26) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(["overview": "一覧", "mixer": "受信・収録", "timeline": "タイムライン", "routing": "ルーティング"][page] ?? "").font(.system(size: 22, weight: .light))
+            }
+            Spacer()
+            Readout(title: "ONLINE", value: String(format: "%02d RX", connected))
+            Readout(title: "SELECTED", value: String(format: "%02d RX", store.targets.count))
+            Button { store.bulk("refresh_all") } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty || store.targetsBusy)
+        }.padding(.horizontal, 24).padding(.vertical, 20)
+            .overlay(alignment: .bottom) { Rectangle().fill(Console.line).frame(height: 1) }
+    }
+    private var transport: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            HStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("TIMECODE").font(.system(size: 10, weight: .bold)).tracking(1.5)
+                }.frame(width: 112, alignment: .leading)
+                Toggle(tcEnabled ? "TC ON" : "TC OFF", isOn: $tcEnabled).toggleStyle(.switch).controlSize(.mini).tint(Console.cyan).foregroundStyle(Console.cyan)
+                Picker("FPS", selection: $fps) { ForEach(0..<Console.fps.count, id: \.self) { Text(Console.fps[$0]).tag($0) } }.frame(width: 142)
+                Picker("出力", selection: $outputMode) { ForEach(0..<Console.outputs.count, id: \.self) { Text(Console.outputs[$0]).tag($0) } }.frame(width: 155)
+                Spacer(minLength: 0)
+                Button("TC を一括適用") {
+                    store.bulk("tc_all", values: ["enabled": tcEnabled ? "1" : "0", "fps": String(fps), "output": String(outputMode)])
+                }.buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty || store.targetsBusy)
+            }
+            Rectangle().fill(Console.line).frame(height: 1)
+            HStack(spacing: 14) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("REC TRANSPORT").font(.system(size: 10, weight: .bold)).tracking(1.2)
+                }.frame(width: 112, alignment: .leading)
+                Picker("収録先", selection: $recordingMode) {
+                    Text("Mac").tag("mac"); Text("本体").tag("device"); Text("両方").tag("both")
+                }.pickerStyle(.segmented).frame(width: 210)
+                Spacer()
+                Button { recording(start: true) } label: { Label("一括収録開始", systemImage: "record.circle") }
+                    .buttonStyle(ConsoleButton(active: true, color: Color(red: 0.85, green: 0.24, blue: 0.29))).disabled(store.targets.isEmpty || (recordingMode != "mac" && store.targetsBusy))
+                Button { recording(start: false) } label: { Label("停止", systemImage: "stop.fill") }
+                    .buttonStyle(ConsoleButton(color: Color(white: 0.75))).disabled(store.targets.isEmpty)
+            }
+        }.padding(18).background(Console.panel).overlay(alignment: .bottom) { Rectangle().fill(Console.line).frame(height: 1) }
+    }
+    private func recording(start: Bool) {
+        if recordingMode != "device" { store.bulk(start ? "record_all" : "stop_all", values: ["folder": store.folder.path]) }
+        if recordingMode != "mac" { store.bulk(start ? "device_record_all" : "device_stop_all") }
+    }
+    private var footer: some View {
+        HStack(spacing: 10) {
+            StatusDot(active: store.running)
+            Text(store.running ? "ENGINE ONLINE" : "ENGINE OFFLINE").font(.system(size: 9, design: .monospaced)).foregroundStyle(store.running ? .green : Console.muted)
+            Rectangle().fill(Console.line).frame(width: 1, height: 12)
+            Button("録音先…") { store.chooseFolder() }.buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(Color(white: 0.78))
+            Text(store.folder.path).font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted).lineLimit(1).truncationMode(.middle)
+            Spacer()
+            if !store.running { Button("再開") { Task { await store.start() } }.buttonStyle(ConsoleButton()) }
+            Text("CAF / 32-BIT FLOAT").font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
+        }.padding(.horizontal, 20).padding(.vertical, 12).background(Console.strip)
+    }
+    private func errorBanner(_ message: String) -> some View {
+        Label(message, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(.orange).textSelection(.enabled)
     }
 }
-
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     let store = MicStore()
     func applicationDidFinishLaunching(_ notification: Notification) { Task { await store.start() } }
@@ -325,7 +595,7 @@ struct MainView: View {
     var body: some Scene {
         Window("DJI Mic 3 Bridge", id: "main") {
             MainView(store: store)
-        }.defaultSize(width: 880, height: 650)
+        }.defaultSize(width: 1240, height: 920)
         MenuBarExtra("DJI Mic 3 Bridge", systemImage: "mic.fill") {
             MenuContent(store: store)
         }

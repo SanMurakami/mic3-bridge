@@ -8,6 +8,7 @@
 #include <set>
 #include <mutex>
 #include <thread>
+#include <mach/mach_time.h>
 #include "MicIdentity.hpp"
 #include "MicTelemetry.hpp"
 #include "USBControlLock.hpp"
@@ -35,7 +36,7 @@ class USBIdentityMonitor {
         if(previous!=1&&![interface selectAlternateSetting:1 error:&error]){[interface destroy];return;}
         IOUSBHostPipe *pipe=[interface copyPipeWithAddress:0x81 error:&error];IdentityParser parser;
         TelemetryParser status;
-        parser.onFrame=[&](const uint8_t *p,size_t n){status.frame(p,n);};
+        parser.onFrame=[&](const uint8_t *p,size_t n){auto old=status.state.timecode;bool known=status.state.known;status.frame(p,n);if(status.state.known&&(!known||old!=status.state.timecode)){mach_timebase_info_data_t tb;mach_timebase_info(&tb);status.state.observedHostSeconds=mach_absolute_time()*(double)tb.numer/tb.denom/1e9;}};
         auto start=std::chrono::steady_clock::now();
         while(pipe&&running&&(parser.identity.serial.empty()||std::chrono::steady_clock::now()-start<std::chrono::milliseconds(500))&&std::chrono::steady_clock::now()-start<std::chrono::seconds(2)){
             NSMutableData *data=[NSMutableData dataWithLength:2048];NSUInteger count=0;error=nil;
