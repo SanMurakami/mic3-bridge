@@ -11,13 +11,30 @@ int main(void) {
     assert(DJIMicFactory(NULL,kAudioServerPlugInTypeUUID)==DriverRef);
     assert(Initialize(DriverRef,NULL)==noErr);
     UInt32 size=0,used=0;AudioObjectPropertyAddress a={kAudioPlugInPropertyDeviceList,kAudioObjectPropertyScopeGlobal,0};
-    assert(PropertySize(DriverRef,Plugin,0,&a,0,NULL,&size)==noErr&&size==8);
-    AudioObjectID devices[2]={0};assert(Get(DriverRef,Plugin,0,&a,0,NULL,8,&used,devices)==noErr);
-    assert(devices[0]==DeviceA&&devices[1]==DeviceB);
+    assert(PropertySize(DriverRef,Plugin,0,&a,0,NULL,&size)==noErr&&size==0);
+    CFMutableArrayRef rows=CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
+    for(int i=0;i<12;i++) {
+        CFStringRef u=CFStringCreateWithFormat(NULL,NULL,CFSTR("local.dji-mic.input.test-%d"),i);
+        const void *keys[]={CFSTR("uid"),CFSTR("name")},*values[]={u,CFSTR("テスト入力")};
+        CFDictionaryRef row=CFDictionaryCreate(NULL,keys,values,2,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+        CFArrayAppendValue(rows,row);CFRelease(row);CFRelease(u);
+    }
+    a.mSelector=DJI_DEVICES_SELECTOR;
+    assert(Set(DriverRef,Plugin,0,&a,0,NULL,sizeof(rows),&rows)==noErr);
+    // 再登録で重複しない。2 台を超えて動的に追加でき、空の登録でも切断中の入力を残す。
+    assert(Set(DriverRef,Plugin,0,&a,0,NULL,sizeof(rows),&rows)==noErr);
+    CFRelease(rows);rows=CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
+    assert(Set(DriverRef,Plugin,0,&a,0,NULL,sizeof(rows),&rows)==noErr);CFRelease(rows);
+    CFStringRef invalid=CFSTR("不正");
+    assert(Set(DriverRef,Plugin,0,&a,0,NULL,sizeof(invalid),&invalid)==kAudioHardwareIllegalOperationError);
+    a.mSelector=kAudioPlugInPropertyDeviceList;
+    assert(PropertySize(DriverRef,Plugin,0,&a,0,NULL,&size)==noErr&&size==12*sizeof(AudioObjectID));
+    AudioObjectID devices[12]={0};assert(Get(DriverRef,Plugin,0,&a,0,NULL,sizeof(devices),&used,devices)==noErr);
+    AudioObjectID DeviceA=devices[0],DeviceB=devices[1],StreamA=DeviceA+1,StreamB=DeviceB+1;
     a=(AudioObjectPropertyAddress){kAudioDevicePropertyStreams,kAudioObjectPropertyScopeOutput,0};
     assert(PropertySize(DriverRef,DeviceA,0,&a,0,NULL,&size)==noErr&&size==0);
     a=(AudioObjectPropertyAddress){kAudioDevicePropertyDeviceUID,kAudioObjectPropertyScopeGlobal,0};
-    for(int i=0;i<2;i++){CFStringRef value=NULL;assert(Get(DriverRef,devices[i],0,&a,0,NULL,sizeof(value),&used,&value)==noErr);assert(CFEqual(value,uid(i)));CFRelease(value);}
+    for(int i=0;i<2;i++){CFStringRef value=NULL;assert(Get(DriverRef,devices[i],0,&a,0,NULL,sizeof(value),&used,&value)==noErr);assert(CFEqual(value,uid(slot(devices[i]))));CFRelease(value);}
     a=(AudioObjectPropertyAddress){kAudioDevicePropertyNominalSampleRate,kAudioObjectPropertyScopeGlobal,0};
     double unsupported=44100;assert(Set(DriverRef,DeviceA,0,&a,0,NULL,sizeof(unsupported),&unsupported)==kAudioDeviceUnsupportedFormatError);
     DJIPacket packet={.version=1,.frames=1024,.channels=4,.sourceRate=48000,.rateScalar=1};
@@ -45,10 +62,10 @@ int main(void) {
     assert(IO(DriverRef,DeviceA,StreamA,1,kAudioServerPlugInIOOperationReadInput,64,&info,first,NULL)==noErr);
     for(unsigned i=0;i<64*4;i++)assert(first[i]==0);
     // リング一周後の古いサンプルを新しい時刻の音として読まない。
-    DJIRead(&Rings[1],frame+DJI_RING_FRAMES,64,second);for(unsigned i=0;i<64*4;i++)assert(second[i]==0);
+    DJIRead(slot(DeviceB)->ring,frame+DJI_RING_FRAMES,64,second);for(unsigned i=0;i<64*4;i++)assert(second[i]==0);
     // 44.1kHz のタイムスタンプを仮想 48kHz の timeline へ変換する。
     packet.sourceRate=44100;for(unsigned i=0;i<packet.frames*4;i++)packet.samples[i]=.25f;
-    putPacket(DeviceA,&packet,bytes,noErr);DJIRead(&Rings[0],frame,64,first);for(unsigned i=0;i<64*4;i++)assert(first[i]==.25f);
+    putPacket(DeviceA,&packet,bytes,noErr);DJIRead(slot(DeviceA)->ring,frame,64,first);for(unsigned i=0;i<64*4;i++)assert(first[i]==.25f);
     assert(Start(DriverRef,DeviceA,1)==noErr);double sample;uint64_t host,seed;
     assert(Zero(DriverRef,DeviceA,1,&sample,&host,&seed)==noErr);uint64_t previousSeed=seed;
     assert(Stop(DriverRef,DeviceA,1)==noErr);assert(Start(DriverRef,DeviceA,1)==noErr);

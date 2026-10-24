@@ -14,6 +14,10 @@
 #include <stdexcept>
 #include <iostream>
 #include "Resolver.hpp"
+#include "USBIdentityMonitor.hpp"
+#include "Recorder.hpp"
+#include <fcntl.h>
+#include <cmath>
 #include "../driver/Protocol.h"
 
 static std::atomic<bool> Running(true),Dirty(true);
@@ -37,7 +41,9 @@ static std::vector<dji::Audio> audioDevices(bool physicalOnly) {
         if(!physicalOnly||uid.find("AppleUSBAudioEngine:DJI Technology Co., Ltd.:Wireless Mic Rx:")==0)result.push_back({id,uid});}
     return result;
 }
+static std::map<uint32_t,uint64_t> RegistryIDs;
 static std::vector<dji::USB> usbDevices() {
+    RegistryIDs.clear();
     io_iterator_t iterator=0;std::vector<dji::USB> result;
     if(IOServiceGetMatchingServices(kIOMainPortDefault,IOServiceMatching("IOUSBHostDevice"),&iterator)!=KERN_SUCCESS)return result;
     io_service_t service;
@@ -46,7 +52,8 @@ static std::vector<dji::USB> usbDevices() {
         if(IORegistryEntryCreateCFProperties(service,&props,kCFAllocatorDefault,0)==KERN_SUCCESS) {
             NSDictionary *dict=CFBridgingRelease(props);
             if([dict[@"idVendor"] unsignedIntValue]==0x2ca3&&[dict[@"USB Product Name"] isEqual:@"Wireless Mic Rx"])
-                result.push_back({[dict[@"locationID"] unsignedIntValue],[(NSString*)dict[@"USB Serial Number"] UTF8String]?:""});
+            {uint32_t location=[dict[@"locationID"] unsignedIntValue];uint64_t registry=0;IORegistryEntryGetRegistryEntryID(service,&registry);
+                RegistryIDs[location]=registry;result.push_back({location,[(NSString*)dict[@"USB Serial Number"] UTF8String]?:""});}
         }
         IOObjectRelease(service);
     }
@@ -59,7 +66,6 @@ static void reset(AudioObjectID id) {
     CFDataRef payload=CFDataCreate(NULL,(const UInt8*)&value,sizeof(value));
     AudioObjectSetPropertyData(id,&a,0,nullptr,sizeof(payload),&payload);CFRelease(payload);
 }
-struct Config {uint32_t location;std::string uid,name;};
 
 struct Session {
     static constexpr unsigned QueueSize=32;
@@ -70,6 +76,13 @@ struct Session {
     uint64_t sent=0;OSStatus lastError=0;
     double frequency;
     bool started=false;
+    std::array<float,4> peaks{};
+    std::unique_ptr<dji::Recorder> recorder;
+    std::string recordingPath,recordingError;
+    uint64_t recordedFrames=0;
+    void stopRecording(){if(recorder){recordedFrames=recorder->frames;auto error=recorder->close();if(error)recordingError="録音の終了処理エラー: "+std::to_string(error);recorder.reset();}}
+    void record(const std::string& path){stopRecording();recordingError.clear();recordedFrames=0;recorder=std::make_unique<dji::Recorder>(path,format.mSampleRate);recordingPath=path;}
+
     Session(AudioObjectID source,AudioObjectID target):source(source),target(target),frequency(hostFrequency()) {
         auto a=addr(kAudioDevicePropertyStreamFormat,kAudioObjectPropertyScopeInput);UInt32 bytes=sizeof(format);
         check(AudioObjectGetPropertyData(source,&a,0,nullptr,&bytes,&format),"input format");
@@ -125,11 +138,15 @@ struct Session {
             CFDataRef payload=CFDataCreate(NULL,(const UInt8*)&p,bytes);
             lastError=AudioObjectSetPropertyData(target,&a,0,nullptr,sizeof(payload),&payload);CFRelease(payload);
             if(lastError)Dirty=true;else sent+=p.frames;
+            for(unsigned f=0;f<p.frames;f++)for(unsigned c=0;c<4;c++)if(std::isfinite(p.samples[f*4+c]))peaks[c]=std::max(peaks[c],std::abs(p.samples[f*4+c]));
+            if(recorder){try{recorder->append(p.samples,p.frames);recordedFrames=recorder->frames;}catch(const std::exception& e){recordingError=e.what();stopRecording();}}
+
             read.store(r+1,std::memory_order_release);
         }
     }
     bool healthy() const {return lastError==noErr&&(mach_absolute_time()-lastCallback.load())<frequency*2;}
     ~Session() {
+        stopRecording();
         if(started)AudioDeviceStop(source,proc);
         if(proc)AudioDeviceDestroyIOProcID(source,proc);
         auto a=addr(kAudioDevicePropertyStreamFormat,kAudioObjectPropertyScopeInput);
@@ -137,95 +154,128 @@ struct Session {
         reset(target);
     }
 };
-static std::vector<Config> loadConfig(NSString *path) {
-    if(![[NSFileManager defaultManager] fileExistsAtPath:path])return {};
-    NSData *data=[NSData dataWithContentsOfFile:path];NSError *error=nil;
-    id json=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:&error]:nil;
-    if(![json isKindOfClass:[NSArray class]]||[json count]>2)throw std::runtime_error("設定ファイルの登録数は最大2台です");
-    std::vector<Config> configs;std::set<uint32_t> ports;std::set<std::string> uids;
-    for(id row in json) {
-        if(![row isKindOfClass:[NSDictionary class]])throw std::runtime_error("設定の形式が不正です");
-        NSString *location=row[@"usb_location"],*uid=row[@"virtual_uid"];
-        if(![location isKindOfClass:[NSString class]]||![uid isKindOfClass:[NSString class]])throw std::runtime_error("usb_location と virtual_uid が必要です");
-        NSScanner *scanner=[NSScanner scannerWithString:location];unsigned long long value=0;
-        if(![scanner scanHexLongLong:&value]||!scanner.isAtEnd||!value||value>UINT32_MAX)throw std::runtime_error("USB location が不正です");
-        std::string u=uid.UTF8String;
-        if((u!=DJI_UID_A&&u!=DJI_UID_B)||!ports.insert((uint32_t)value).second||!uids.insert(u).second)throw std::runtime_error("USB location と仮想 UID は一意にしてください");
-        configs.push_back({(uint32_t)value,u,u==DJI_UID_A?"DJI Mic3 RX A":"DJI Mic3 RX B"});
-    }
-    return configs;
+static NSString *ns(const std::string& value){return @(value.c_str());}
+struct Receiver {
+    std::string serial,name,firmware,status="未接続",error,path;
+    uint32_t location=0;uint64_t frames=0;double rate=48000;
+    std::unique_ptr<Session> session;
+    std::string uid()const{return "local.dji-mic.input."+serial;}
+    void disconnect(){if(session){session->drain();session->stopRecording();path=session->recordingPath;frames=session->recordedFrames;rate=session->format.mSampleRate;
+        if(!session->recordingError.empty())error=session->recordingError;session.reset();}}
+};
+static AudioObjectID plugin() {
+    auto a=addr(kAudioHardwarePropertyTranslateBundleIDToPlugIn);CFStringRef bundle=CFSTR("local.dji-mic.inputs.driver");AudioObjectID id=0;UInt32 size=sizeof(id);
+    if(AudioObjectGetPropertyData(kAudioObjectSystemObject,&a,sizeof(bundle),&bundle,&size,&id))return 0;return id;
 }
-static void printList() {
-    auto usb=usbDevices();auto physical=audioDevices(true);auto resolved=dji::resolve(usb,physical);
-    NSMutableArray *rows=[NSMutableArray array];
-    for(auto &u:usb) {
-        auto found=resolved.find(u.location);
-        [rows addObject:@{@"usb_location":[NSString stringWithFormat:@"0x%08x",u.location],@"usb_serial":@(u.serial.c_str()),
-            @"audio_id":@(found==resolved.end()?0:found->second.id),@"audio_uid":@(found==resolved.end()?"":found->second.uid.c_str())}];
+static void emit(id object){NSData *data=[NSJSONSerialization dataWithJSONObject:object options:0 error:nil];if(data){fwrite(data.bytes,1,data.length,stdout);putchar('\n');fflush(stdout);}}
+class Manager {
+    std::map<std::string,Receiver> receivers;
+    dji::USBIdentityMonitor identities;
+    NSString *configPath;
+    bool configDirty=true;
+    std::string globalError;
+    unsigned unidentified=0;
+    AudioObjectID lastPlugin=0;
+public:
+    Manager(NSString *path):configPath(path){
+        if(![[NSFileManager defaultManager] fileExistsAtPath:path])return;
+        NSData *data=[NSData dataWithContentsOfFile:path];NSError *error=nil;
+        id rows=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:&error]:nil;
+        if(![rows isKindOfClass:[NSArray class]])throw std::runtime_error("receivers.json が壊れています。元ファイルを保護して終了します");
+        for(id row in rows){if(![row isKindOfClass:[NSDictionary class]]||![row[@"serial"] isKindOfClass:[NSString class]]||![row[@"name"] isKindOfClass:[NSString class]])throw std::runtime_error("receivers.json の形式が不正です");
+            std::string serial=[row[@"serial"] UTF8String],name=[row[@"name"] UTF8String];
+            if(!dji::validSerial(serial)||!name.size()||[row[@"name"] length]>90||receivers.count(serial))throw std::runtime_error("登録した serial / 名前が不正です");
+            auto& r=receivers[serial];r.serial=serial;r.name=name;
+        }
     }
-    NSData *data=[NSJSONSerialization dataWithJSONObject:rows options:NSJSONWritingPrettyPrinted error:nil];
-    fwrite(data.bytes,1,data.length,stdout);putchar('\n');
-}
-int main(int argc,const char *argv[]) {@autoreleasepool {
-    try {
-        if(argc==2&&std::string(argv[1])=="--list"){printList();return 0;}
-        std::vector<std::string> defaultArgs;
-        if(argc==1) {
-            NSString *userConfig=[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/DJI Mic Bridge/receivers.json"];
-            NSString *path=userConfig;
-            defaultArgs={argv[0],"--config",path.UTF8String};
+    void save(){
+        NSMutableArray *rows=[NSMutableArray array];for(auto& [serial,r]:receivers)[rows addObject:@{@"serial":ns(serial),@"name":ns(r.name)}];
+        NSError *error=nil;NSString *dir=[configPath stringByDeletingLastPathComponent];
+        if(![[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&error])throw std::runtime_error(error.localizedDescription.UTF8String);
+        NSData *data=[NSJSONSerialization dataWithJSONObject:rows options:NSJSONWritingPrettyPrinted error:&error];
+        if(!data||![data writeToFile:configPath options:NSDataWritingAtomic error:&error])throw std::runtime_error(error.localizedDescription.UTF8String);
+    }
+    void scan(){
+        auto usb=usbDevices();auto physical=audioDevices(true);auto mapping=dji::resolve(usb,physical);
+        std::map<std::string,std::vector<uint32_t>> found;unidentified=0;
+        for(auto& u:usb){auto identity=identities.get(RegistryIDs[u.location]);if(identity.serial.empty()){unidentified++;continue;}
+            found[identity.serial].push_back(u.location);
+            if(!receivers.count(identity.serial)){auto& r=receivers[identity.serial];r.serial=identity.serial;r.name="DJI Mic3 · "+r.serial;configDirty=true;save();}
+            receivers[identity.serial].firmware=identity.firmware;
         }
-        std::vector<const char*> args;
-        if(!defaultArgs.empty()){for(auto& arg:defaultArgs)args.push_back(arg.c_str());argc=(int)args.size();argv=args.data();}
-        if(argc<3||std::string(argv[1])!="--config")throw std::runtime_error("使用法: dji-mic-bridge --list | --config PATH [--seconds N] [--no-driver]");
-        auto configs=loadConfig(@(argv[2]));double seconds=0;bool noDriver=false;
-        for(int i=3;i<argc;i++) {
-            std::string arg=argv[i];
-            if(arg=="--no-driver")noDriver=true;
-            else if(arg=="--seconds"&&i+1<argc){seconds=std::stod(argv[++i]);if(!std::isfinite(seconds)||seconds<=0)throw std::runtime_error("seconds は正の有限値が必要です");}
-            else throw std::runtime_error("不明な引数: "+arg);
+        auto plug=plugin();if(plug!=lastPlugin){configDirty=true;lastPlugin=plug;}
+        globalError=plug?"":"専用 HAL ドライバーが見つかりません。Install.command を実行してください。";
+        if(plug&&configDirty){NSMutableArray *rows=[NSMutableArray array];for(auto& [serial,r]:receivers)[rows addObject:@{@"uid":ns(r.uid()),@"name":ns(r.name)}];
+            auto a=addr(DJI_DEVICES_SELECTOR);CFArrayRef value=(__bridge CFArrayRef)rows;
+            auto error=AudioObjectSetPropertyData(plug,&a,0,nullptr,sizeof(value),&value);
+            if(error)globalError="仮想入力の登録に失敗: "+std::to_string(error);else configDirty=false;
         }
-        NSString *lockPath=[NSTemporaryDirectory() stringByAppendingPathComponent:@"local.dji-mic.bridge.lock"];
-        int lockFD=open(lockPath.fileSystemRepresentation,O_CREAT|O_RDWR|O_NOFOLLOW,0600);
-        if(lockFD<0||flock(lockFD,LOCK_EX|LOCK_NB))throw std::runtime_error("ブリッジはすでに起動しているか、ロックを取得できません");
-        if(!noDriver) {
-            auto auth=[AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
-            if(auth==AVAuthorizationStatusNotDetermined){dispatch_semaphore_t sem=dispatch_semaphore_create(0);__block bool granted=false;
-                [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL ok){granted=ok;dispatch_semaphore_signal(sem);}];
-                if(dispatch_semaphore_wait(sem,dispatch_time(DISPATCH_TIME_NOW,60*NSEC_PER_SEC))||!granted)throw std::runtime_error("マイク権限が必要です");
-            }else if(auth!=AVAuthorizationStatusAuthorized)throw std::runtime_error("マイク権限が必要です");
+        auto all=audioDevices(false);
+        for(auto& [serial,r]:receivers){AudioObjectID source=0,target=0;r.location=0;
+            auto seen=found.find(serial);bool duplicate=seen!=found.end()&&seen->second.size()>1;
+            if(seen!=found.end()&&!duplicate){r.location=seen->second[0];auto sourceIt=mapping.find(r.location);if(sourceIt!=mapping.end())source=sourceIt->second.id;}
+            for(auto& d:all)if(d.uid==r.uid())target=d.id;
+            if(r.session){AudioStreamBasicDescription format{};auto a=addr(kAudioDevicePropertyStreamFormat,kAudioObjectPropertyScopeInput);UInt32 size=sizeof(format);
+                bool changedFormat=source&& (AudioObjectGetPropertyData(source,&a,0,nullptr,&size,&format)||memcmp(&format,&r.session->format,sizeof(format)));
+                if(r.session->source!=source||r.session->target!=target||!r.session->healthy()||changedFormat){bool recording=!!r.session->recorder;r.disconnect();if(recording)r.error="接続または音声形式の変更により録音を終了しました。";}}
+            r.status=duplicate?"個体 ID 重複（転送停止）":!r.location?"未接続":!source?"音声入力を確認中":!target?"仮想入力を準備中":"接続中";
+            if(source&&target&&!r.session){try{r.session=std::make_unique<Session>(source,target);r.session->start();}catch(const std::exception& e){r.disconnect();r.status="接続再試行中";r.error=e.what();}}
         }
-        signal(SIGINT,signalStop);signal(SIGTERM,signalStop);
+    }
+    void drain(){for(auto& [serial,r]:receivers)if(r.session)r.session->drain();}
+    void command(NSDictionary *command){
+        if(![command isKindOfClass:[NSDictionary class]]||![command[@"serial"] isKindOfClass:[NSString class]])return;
+        auto it=receivers.find([command[@"serial"] UTF8String]);if(it==receivers.end())return;auto& r=it->second;
+        r.error.clear();
+        try{NSString *op=command[@"op"];
+            if([op isEqual:@"rename"]){NSString *name=command[@"name"];
+                if(![name isKindOfClass:[NSString class]])return;name=[name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if(!name.length||name.length>90||[name rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location!=NSNotFound)throw std::runtime_error("名前は 1〜90 文字で、改行を含めず入力してください。");
+                for(auto& [serial,other]:receivers)if(serial!=r.serial&&other.name==name.UTF8String)throw std::runtime_error("他のレシーバーと異なる名前にしてください。");
+                auto old=r.name;r.name=name.UTF8String;try{save();}catch(...){r.name=old;throw;}configDirty=true;Dirty=true;
+            }else if([op isEqual:@"record"]){
+                if(!r.session)throw std::runtime_error("接続中のレシーバーで録音してください。");
+                NSString *folder=command[@"folder"];if(![folder isKindOfClass:[NSString class]]||!folder.isAbsolutePath)throw std::runtime_error("保存先フォルダーが必要です。");
+                NSError *error=nil;if(![[NSFileManager defaultManager] createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:&error])throw std::runtime_error(error.localizedDescription.UTF8String);
+                NSDateFormatter *date=[NSDateFormatter new];date.locale=[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];date.dateFormat=@"yyyyMMdd-HHmmss";
+                NSString *file=[NSString stringWithFormat:@"%@-%@-%@.caf",[date stringFromDate:NSDate.date],ns(r.serial),NSUUID.UUID.UUIDString];
+                r.session->record([[folder stringByAppendingPathComponent:file] fileSystemRepresentation]);
+            }else if([op isEqual:@"stop"]){if(r.session)r.session->stopRecording();}
+        }catch(const std::exception& e){r.error=e.what();}
+    }
+    void snapshot(){NSMutableArray *rows=[NSMutableArray array];
+        for(auto& [serial,r]:receivers){NSMutableArray *peaks=[NSMutableArray array];Session *s=r.session.get();for(unsigned c=0;c<4;c++){[peaks addObject:@(s?s->peaks[c]:0)];if(s)s->peaks[c]=0;}
+            auto frames=s?s->recordedFrames:r.frames;double rate=s?s->format.mSampleRate:r.rate;std::string path=s?s->recordingPath:r.path;
+            std::string error=s&&!s->recordingError.empty()?s->recordingError:r.error;
+            [rows addObject:@{@"serial":ns(serial),@"name":ns(r.name),@"firmware":ns(r.firmware),@"status":ns(r.status),@"connected":@(s!=nullptr),
+                @"source_id":@(s?s->source:0),@"virtual_id":@(s?s->target:0),@"virtual_uid":ns(r.uid()),@"usb_location":[NSString stringWithFormat:@"0x%08x",r.location],
+                @"meters":peaks,@"recording":@(s&&s->recorder),@"recorded_seconds":@(frames/rate),@"recording_path":ns(path),@"error":ns(error),@"dropped":@(s?s->dropped.load():0)}];
+        }
+        emit(@{@"receivers":rows,@"unidentified":@(unidentified),@"error":ns(globalError)});
+    }
+    ~Manager(){for(auto& [serial,r]:receivers)r.disconnect();}
+};
+int main(int argc,const char *argv[]) {@autoreleasepool{
+    try{
+        double seconds=0;NSString *path=[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/DJI Mic Bridge/receivers.json"];
+        for(int i=1;i<argc;i++){std::string arg=argv[i];if(arg=="--seconds"&&i+1<argc)seconds=std::stod(argv[++i]);else if(arg=="--config"&&i+1<argc)path=@(argv[++i]);else throw std::runtime_error("不明な引数: "+arg);}
+        int lockFD=open([[NSTemporaryDirectory() stringByAppendingPathComponent:@"local.dji-mic.bridge.lock"] fileSystemRepresentation],O_CREAT|O_RDWR|O_NOFOLLOW,0600);
+        if(lockFD<0||flock(lockFD,LOCK_EX|LOCK_NB))throw std::runtime_error("ブリッジがすでに起動しています。");
+        signal(SIGINT,signalStop);signal(SIGTERM,signalStop);signal(SIGPIPE,SIG_IGN);
+        fcntl(STDIN_FILENO,F_SETFL,fcntl(STDIN_FILENO,F_GETFL)|O_NONBLOCK);
         auto a=addr(kAudioHardwarePropertyDevices);check(AudioObjectAddPropertyListener(kAudioObjectSystemObject,&a,changed,nullptr),"device listener");
-        std::array<std::unique_ptr<Session>,2> sessions;std::array<std::string,2> previous;
-        auto begin=std::chrono::steady_clock::now(),lastScan=begin-std::chrono::seconds(1);
-        while(Running) {@autoreleasepool {
-            auto now=std::chrono::steady_clock::now();
-            if(seconds>0&&std::chrono::duration<double>(now-begin).count()>=seconds)break;
-            if(Dirty.exchange(false)||now-lastScan>=std::chrono::milliseconds(500)) {
-                lastScan=now;
-                auto physical=audioDevices(true),all=audioDevices(false);auto mapped=dji::resolve(usbDevices(),physical);
-                for(unsigned i=0;i<configs.size();i++) {
-                    auto &config=configs[i];auto found=mapped.find(config.location);AudioObjectID target=0;
-                    for(auto &d:all)if(d.uid==config.uid)target=d.id;
-                    AudioObjectID source=found==mapped.end()?0:found->second.id;
-                    if(sessions[i]&&(!source||!target||sessions[i]->source!=source||sessions[i]->target!=target||!sessions[i]->healthy()))sessions[i].reset();
-                    // フォーマット変更を検出した場合も入力を作り直す。
-                    if(sessions[i]){AudioStreamBasicDescription format{};auto p=addr(kAudioDevicePropertyStreamFormat,kAudioObjectPropertyScopeInput);UInt32 bytes=sizeof(format);
-                        if(AudioObjectGetPropertyData(source,&p,0,nullptr,&bytes,&format)||memcmp(&format,&sessions[i]->format,sizeof(format)))sessions[i].reset();}
-                    std::string status=noDriver?"監視のみ":!target?"ドライバー未導入":!source?"レシーバー未接続":"接続中";
-                    if(!noDriver&&source&&target&&!sessions[i]) {
-                        try{sessions[i]=std::make_unique<Session>(source,target);sessions[i]->start();}
-                        catch(const std::exception& e){sessions[i].reset();status=std::string("再試行待ち: ")+e.what();}
-                    }
-                    status+=" source="+std::to_string(source)+" target="+std::to_string(target);
-                    if(status!=previous[i]){std::cerr<<config.name<<": "<<status<<std::endl;previous[i]=status;}
-                }
-            }
-            for(auto &s:sessions)if(s)s->drain();
+        Manager manager(path);std::string pending;pid_t parent=getppid();
+        auto begin=std::chrono::steady_clock::now(),scan=begin-std::chrono::seconds(1),snapshot=scan;
+        while(Running){@autoreleasepool{
+            if(getppid()!=parent)break;
+            auto now=std::chrono::steady_clock::now();if(seconds>0&&std::chrono::duration<double>(now-begin).count()>=seconds)break;
+            char buffer[4096];ssize_t count=0;while((count=read(STDIN_FILENO,buffer,sizeof(buffer)))>0){pending.append(buffer,count);if(pending.size()>65536){pending.clear();break;}}
+            size_t newline;while((newline=pending.find('\n'))!=std::string::npos){auto line=pending.substr(0,newline);pending.erase(0,newline+1);
+                NSData *data=[NSData dataWithBytes:line.data() length:line.size()];id command=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];manager.command(command);}
+            if(Dirty.exchange(false)||now-scan>std::chrono::milliseconds(500)){scan=now;manager.scan();}
+            manager.drain();if(now-snapshot>std::chrono::milliseconds(200)){snapshot=now;manager.snapshot();}
             std::this_thread::sleep_for(std::chrono::milliseconds(3));
         }}
-        for(unsigned i=0;i<sessions.size();i++)if(sessions[i])std::cerr<<configs[i].name<<": received="<<sessions[i]->received<<" sent="<<sessions[i]->sent<<" dropped="<<sessions[i]->dropped<<std::endl;
-        sessions={};AudioObjectRemovePropertyListener(kAudioObjectSystemObject,&a,changed,nullptr);close(lockFD);return 0;
-    }catch(const std::exception& error){std::cerr<<"エラー: "<<error.what()<<std::endl;return 1;}
+        AudioObjectRemovePropertyListener(kAudioObjectSystemObject,&a,changed,nullptr);close(lockFD);return 0;
+    }catch(const std::exception& e){emit(@{@"receivers":@[],@"unidentified":@0,@"error":@(e.what())});std::cerr<<e.what()<<std::endl;return 1;}
 }}
