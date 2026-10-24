@@ -2,13 +2,16 @@
 #include "TimecodeSync.hpp"
 #include <memory>
 #include <thread>
+#include <pthread/qos.h>
+#include <sys/resource.h>
+#include <mach/task_policy.h>
 // 一つのUSB lockと時計を共有し、全RXの準備完了後に時計だけ同時送信する。
 struct SyncEndpoint {
     std::string serial;uint64_t registry=0;unsigned previous=0;
     IOUSBHostInterface *iface=nil;IOUSBHostPipe *in=nil,*out=nil;
     dji::IdentityParser parser;dji::TelemetryParser telemetry;
     std::set<uint16_t> acks;uint16_t sequence=uint16_t(arc4random_uniform(65536));
-    bool accepted=false,verified=false;double sentHost=0,finishedHost=0,errorFrames=1e9;std::string error;
+    int qosResult=0;bool accepted=false,verified=false;double sentHost=0,finishedHost=0,errorFrames=1e9;std::string error;
     NSMutableArray *events=[NSMutableArray array];
     ~SyncEndpoint(){if(iface){if(previous!=1)[iface selectAlternateSetting:previous error:nil];[iface destroy];}}
     static double host(){mach_timebase_info_data_t tb;mach_timebase_info(&tb);return mach_absolute_time()*(double)tb.numer/tb.denom/1e9;}
@@ -25,6 +28,11 @@ struct SyncEndpoint {
     template<class Match>bool prepare(unsigned setting,uint8_t value,Match match){for(int attempt=0;attempt<2;attempt++){auto seq=sequence++;if(!write(setting,{value},seq))return false;read(.8,[&]{return acks.count(seq)&&match(telemetry.state);});if(acks.count(seq)&&match(telemetry.state))return true;}return false;}
 };
 static NSDictionary *syncTimecode(int argc,const char *argv[]){
+    int foregroundResult=setpriority(PRIO_DARWIN_PROCESS,0,0);
+    struct task_qos_policy timerPolicy={LATENCY_QOS_TIER_0,THROUGHPUT_QOS_TIER_UNSPECIFIED};
+    auto latencyResult=task_policy_set(mach_task_self(),TASK_OVERRIDE_QOS_POLICY,(task_policy_t)&timerPolicy,TASK_QOS_POLICY_COUNT);
+    id activity=[NSProcessInfo.processInfo beginActivityWithOptions:(NSActivityUserInitiated|NSActivityLatencyCritical) reason:@"TC synchronization"];
+    struct ActivityScope {id token;~ActivityScope(){[NSProcessInfo.processInfo endActivity:token];}} activityScope{activity};
     NSMutableDictionary *results=[NSMutableDictionary dictionary];bool success=false;std::string failure;double targetWall=0,targetHost=0;
     std::vector<std::unique_ptr<SyncEndpoint>> endpoints;
     try{
@@ -51,10 +59,12 @@ static NSDictionary *syncTimecode(int argc,const char *argv[]){
             if(!e->telemetry.state.tcEnabled&&!e->prepare(0x35,1,[](auto& s){return s.tcEnabled;}))throw std::runtime_error("TCを有効にできません。時計の同期は行っていません。");}
         // 全workerの起動余裕を確保。NDFはこの瞬間の壁時計へjamし、その後は選択FPSでfree-runする。
         targetWall=std::ceil(NSDate.date.timeIntervalSince1970+.5);double wall=NSDate.date.timeIntervalSince1970;
-        auto deadline=std::chrono::steady_clock::now()+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(targetWall-wall));targetHost=SyncEndpoint::host()+targetWall-wall;
+        targetHost=SyncEndpoint::host()+targetWall-wall;mach_timebase_info_data_t timebase;mach_timebase_info(&timebase);uint64_t deadline=uint64_t(targetHost*1e9*timebase.denom/timebase.numer);
         std::vector<std::thread> workers;workers.reserve(endpoints.size());
         try{for(auto& item:endpoints){auto *e=item.get();workers.emplace_back([&,e]{@autoreleasepool{try{
-            auto clock=dji::tcWallClock(time_t(targetWall),fps,e->telemetry.state.clock[0]);std::this_thread::sleep_until(deadline);
+            // launchd由来のbackground QoS/timer coalescingでjam境界を遅らせない。
+            e->qosResult=pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
+            auto clock=dji::tcWallClock(time_t(targetWall),fps,e->telemetry.state.clock[0]);while(mach_absolute_time()<deadline)mach_wait_until(deadline);
             e->sentHost=SyncEndpoint::host();if(e->sentHost-targetHost>.02){e->error="TC送信時刻を超過しました。再同期してください。";return;}
             auto reset=e->sequence++;bool resetSent=e->write(0x2f,{1},reset);e->read(.5,[&]{return e->acks.count(reset);});
             // reset後はACKの有無にかかわらずclockを送信する。
@@ -72,6 +82,6 @@ static NSDictionary *syncTimecode(int argc,const char *argv[]){
     }catch(const std::exception& e){failure=e.what();}
     double first=1e30,last=0;
     for(auto& e:endpoints){if(e->sentHost){first=std::min(first,e->sentHost);last=std::max(last,e->sentHost);}
-        results[@(e->serial.c_str())]=@{@"success":@(e->verified),@"message":@(e->error.empty()?(success?"":failure.c_str()):e->error.c_str()),@"status":jsonStatus(e->telemetry.state),@"accepted":@(e->accepted),@"error_frames":@(e->errorFrames),@"sent_host_seconds":@(e->sentHost),@"write_completed_host_seconds":@(e->finishedHost),@"events":e->events,@"sync":@{@"target_wall_seconds":@(targetWall),@"target_host_seconds":@(targetHost),@"sent_host_seconds":@(e->sentHost),@"error_frames":@(e->errorFrames)}};}
-    return @{@"success":@(success),@"message":@(failure.c_str()),@"target_wall_seconds":@(targetWall),@"target_host_seconds":@(targetHost),@"send_spread_ms":@(last?1000*(last-first):0),@"receivers":results};
+        results[@(e->serial.c_str())]=@{@"success":@(e->verified),@"message":@(e->error.empty()?(success?"":failure.c_str()):e->error.c_str()),@"status":jsonStatus(e->telemetry.state),@"accepted":@(e->accepted),@"error_frames":@(e->errorFrames),@"qos_result":@(e->qosResult),@"sent_host_seconds":@(e->sentHost),@"write_completed_host_seconds":@(e->finishedHost),@"events":e->events,@"sync":@{@"foreground_result":@(foregroundResult),@"latency_policy_result":@(latencyResult),@"target_wall_seconds":@(targetWall),@"target_host_seconds":@(targetHost),@"sent_host_seconds":@(e->sentHost),@"error_frames":@(e->errorFrames)}};}
+    return @{@"success":@(success),@"message":@(failure.c_str()),@"target_wall_seconds":@(targetWall),@"target_host_seconds":@(targetHost),@"send_spread_ms":@(last?1000*(last-first):0),@"foreground_result":@(foregroundResult),@"latency_policy_result":@(latencyResult),@"receivers":results};
 }

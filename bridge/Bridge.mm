@@ -390,7 +390,7 @@ public:
                 targets.push_back(r.serial);[args addObjectsFromArray:@[serial,[NSString stringWithFormat:@"%llu",(unsigned long long)id]]];}
             if(targets.empty()||controlJobs.size()>=64)throw std::runtime_error("TC同期の対象がないか操作が混み合っています。");
             NSTask *task=[NSTask new];NSPipe *pipe=[NSPipe pipe];task.standardOutput=pipe;task.standardError=NSFileHandle.fileHandleWithNullDevice;
-            task.executableURL=[NSURL fileURLWithPath:[[[NSBundle mainBundle].executablePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"dji-mic-control"]];task.arguments=args;
+            task.executableURL=[NSURL fileURLWithPath:[[[NSBundle mainBundle].executablePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"dji-mic-control"]];task.arguments=args;task.qualityOfService=NSQualityOfServiceUserInitiated;
             for(auto& serial:targets){receivers.at(serial).error.clear();receivers.at(serial).controlMessage.clear();}
             controlJobs.push_back({task,pipe,targets.front(),false,targets});updateControlBusy();
         }catch(const std::exception& e){commandError=e.what();}return;}

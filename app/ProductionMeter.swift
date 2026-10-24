@@ -99,5 +99,5 @@ struct LiveTimecode: View {
         guard let host = receiver.tc.observed_host_seconds, host > 0 else { return "—:—:—:—" }
         return ClockAnchor(host: host, tc: receiver.tc).text(at: feed.frame.now) ?? "—:—:—:—"
     }
-    var body: some View { Text(value).monospacedDigit().accessibilityLabel("TC \(receiver.serial.suffix(6))") }
+    var body: some View { Text(value).monospacedDigit().accessibilityLabel("TC \(receiver.serial.suffix(6))").accessibilityValue(value) }
 }
