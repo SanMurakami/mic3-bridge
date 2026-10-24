@@ -16,5 +16,11 @@ with open(destination,'wb') as f:
       'StandardOutPath':logs+'/bridge.log','StandardErrorPath':logs+'/bridge.log'},f)
 PY
 launchctl bootout "gui/$(id -u)/local.dji-mic.bridge" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$agent_dir/local.dji-mic.bridge.plist"
+# bootout の返却直後は launchd が旧サービスを削除中の場合がある。
+started=false
+for attempt in 1 2 3 4 5; do
+    if launchctl bootstrap "gui/$(id -u)" "$agent_dir/local.dji-mic.bridge.plist"; then started=true; break; fi
+    sleep 0.5
+done
+if [[ "$started" != true ]]; then echo '常駐の登録に失敗しました。' >&2; exit 1; fi
 echo "常駐を開始しました。ログ: $log_dir/bridge.log"

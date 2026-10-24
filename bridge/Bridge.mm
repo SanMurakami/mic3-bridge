@@ -156,7 +156,7 @@ struct Session {
 };
 static NSString *ns(const std::string& value){return @(value.c_str());}
 struct Receiver {
-    std::string serial,name,firmware,status="未接続",error,path;
+    std::string serial,name,firmware,status="未接続",error,path,previous;
     uint32_t location=0;uint64_t frames=0;double rate=48000;
     std::unique_ptr<Session> session;
     std::string uid()const{return "local.dji-mic.input."+serial;}
@@ -220,8 +220,11 @@ public:
                 if(r.session->source!=source||r.session->target!=target||!r.session->healthy()||changedFormat){bool recording=!!r.session->recorder;r.disconnect();if(recording)r.error="接続または音声形式の変更により録音を終了しました。";}}
             r.status=duplicate?"個体 ID 重複（転送停止）":!r.location?"未接続":!source?"音声入力を確認中":!target?"仮想入力を準備中":"接続中";
             if(source&&target&&!r.session){try{r.session=std::make_unique<Session>(source,target);r.session->start();}catch(const std::exception& e){r.disconnect();r.status="接続再試行中";r.error=e.what();}}
+            std::string state=r.status+" source="+std::to_string(source)+" target="+std::to_string(target)+" location="+std::to_string(r.location);
+            if(state!=r.previous){std::cerr<<serial<<": "<<state<<std::endl;r.previous=state;}
         }
     }
+    void failed(const std::string& message){globalError=message;for(auto& [serial,r]:receivers){bool recording=r.session&&r.session->recorder;r.disconnect();r.status="音声サービスを再確認中";if(recording)r.error="音声サービスの変更により録音を終了しました。";}}
     void drain(){for(auto& [serial,r]:receivers)if(r.session)r.session->drain();}
     void command(NSDictionary *command){
         if(![command isKindOfClass:[NSDictionary class]]||![command[@"serial"] isKindOfClass:[NSString class]])return;
@@ -272,7 +275,7 @@ int main(int argc,const char *argv[]) {@autoreleasepool{
             char buffer[4096];ssize_t count=0;while((count=read(STDIN_FILENO,buffer,sizeof(buffer)))>0){pending.append(buffer,count);if(pending.size()>65536){pending.clear();break;}}
             size_t newline;while((newline=pending.find('\n'))!=std::string::npos){auto line=pending.substr(0,newline);pending.erase(0,newline+1);
                 NSData *data=[NSData dataWithBytes:line.data() length:line.size()];id command=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];manager.command(command);}
-            if(Dirty.exchange(false)||now-scan>std::chrono::milliseconds(500)){scan=now;manager.scan();}
+            if(Dirty.exchange(false)||now-scan>std::chrono::milliseconds(500)){scan=now;try{manager.scan();}catch(const std::exception& e){manager.failed(e.what());}}
             manager.drain();if(now-snapshot>std::chrono::milliseconds(200)){snapshot=now;manager.snapshot();}
             std::this_thread::sleep_for(std::chrono::milliseconds(3));
         }}

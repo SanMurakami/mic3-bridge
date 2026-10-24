@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <map>
+#include <set>
 #include <mutex>
 #include <thread>
 #include "MicIdentity.hpp"
@@ -38,6 +39,7 @@ class USBIdentityMonitor {
         if(!parser.identity.serial.empty()){std::lock_guard<std::mutex> lock(mutex);identities[id]=parser.identity;}
     }}
     void loop(){while(running){@autoreleasepool{
+        std::set<uint64_t> live;
         io_iterator_t iterator=0;
         if(IOServiceGetMatchingServices(kIOMainPortDefault,IOServiceMatching("IOUSBHostInterface"),&iterator)==KERN_SUCCESS){
             io_service_t service;
@@ -45,7 +47,7 @@ class USBIdentityMonitor {
                 CFMutableDictionaryRef raw=nullptr;IORegistryEntryCreateCFProperties(service,&raw,kCFAllocatorDefault,0);NSDictionary *p=CFBridgingRelease(raw);
                 io_name_t name={0};IORegistryEntryGetName(service,name);
                 if([p[@"idVendor"] unsignedIntValue]==0x2ca3&&[p[@"bInterfaceNumber"] unsignedIntValue]==4&&[p[@"bInterfaceClass"] unsignedIntValue]==255&&std::string(name)=="com.dji.mic"){
-                    uint64_t id=parentID(service);bool known=false;{std::lock_guard<std::mutex> lock(mutex);known=identities.count(id);}
+                    uint64_t id=parentID(service);if(id)live.insert(id);bool known=false;{std::lock_guard<std::mutex> lock(mutex);known=identities.count(id);}
                     auto now=std::chrono::steady_clock::now();
                     if(id&&!known&&(!attempted.count(id)||now-attempted[id]>std::chrono::seconds(3))){attempted[id]=now;inspect(service,id);}
                 }
@@ -53,7 +55,9 @@ class USBIdentityMonitor {
             }
             IOObjectRelease(iterator);
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        {std::lock_guard<std::mutex> lock(mutex);for(auto it=identities.begin();it!=identities.end();)if(!live.count(it->first))it=identities.erase(it);else ++it;}
+        for(auto it=attempted.begin();it!=attempted.end();)if(!live.count(it->first))it=attempted.erase(it);else ++it;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }}}
 public:
     USBIdentityMonitor():worker([this]{loop();}){}

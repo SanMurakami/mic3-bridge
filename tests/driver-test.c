@@ -31,6 +31,12 @@ int main(void) {
     assert(PropertySize(DriverRef,Plugin,0,&a,0,NULL,&size)==noErr&&size==12*sizeof(AudioObjectID));
     AudioObjectID devices[12]={0};assert(Get(DriverRef,Plugin,0,&a,0,NULL,sizeof(devices),&used,devices)==noErr);
     AudioObjectID DeviceA=devices[0],DeviceB=devices[1],StreamA=DeviceA+1,StreamB=DeviceB+1;
+    const void *renameKeys[]={CFSTR("uid"),CFSTR("name")},*renameValues[]={slot(DeviceA)->uid,CFSTR("名前を変更した入力")};
+    CFDictionaryRef renamed=CFDictionaryCreate(NULL,renameKeys,renameValues,2,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    CFArrayRef renameRows=CFArrayCreate(NULL,(const void**)&renamed,1,&kCFTypeArrayCallBacks);
+    a.mSelector=DJI_DEVICES_SELECTOR;assert(Set(DriverRef,Plugin,0,&a,0,NULL,sizeof(renameRows),&renameRows)==noErr);
+    CFRelease(renameRows);CFRelease(renamed);a.mSelector=kAudioObjectPropertyName;CFStringRef label=NULL;
+    assert(Get(DriverRef,DeviceA,0,&a,0,NULL,sizeof(label),&used,&label)==noErr&&CFEqual(label,CFSTR("名前を変更した入力")));CFRelease(label);
     a=(AudioObjectPropertyAddress){kAudioDevicePropertyStreams,kAudioObjectPropertyScopeOutput,0};
     assert(PropertySize(DriverRef,DeviceA,0,&a,0,NULL,&size)==noErr&&size==0);
     a=(AudioObjectPropertyAddress){kAudioDevicePropertyDeviceUID,kAudioObjectPropertyScopeGlobal,0};

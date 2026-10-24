@@ -26,8 +26,18 @@ struct Snapshot: Decodable {
     private var output: Pipe?
     private var stderr: Pipe?
     private var stopping = false
+    private var latest = Snapshot()
+    private var visibilityObserver: NSObjectProtocol?
+    private var visible = true
     init() {
         folder = UserDefaults.standard.url(forKey: "recordingFolder") ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Music/DJI Mic Recordings", isDirectory: true)
+        visibilityObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeOcclusionStateNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.visible = NSApplication.shared.occlusionState.contains(.visible)
+                if self.visible { self.snapshot = self.latest }
+            }
+        }
     }
     func start() async {
         guard process == nil else { return }
@@ -44,7 +54,14 @@ struct Snapshot: Decodable {
         child.standardInput = outgoing; child.standardOutput = incoming; child.standardError = errors
         // 受信と JSON decode は background。UI への反映だけ MainActor、最大 10Hz。
         let reader = SnapshotReader { [weak self] result in
-            Task { @MainActor in self?.snapshot = result }
+            Task { @MainActor in
+                guard let self else { return }
+                self.latest = result
+                // 隠れたウィンドウにメーターの再描画を要求しない。メニューの台数だけ追従。
+                if self.visible || self.snapshot.receivers.map(\.connected) != result.receivers.map(\.connected) || self.snapshot.receivers.map(\.serial) != result.receivers.map(\.serial) {
+                    self.snapshot = result
+                }
+            }
         }
         incoming.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
@@ -216,6 +233,7 @@ struct MainView: View {
                 Text("CAF · Float32 · 4ch").font(.caption).foregroundStyle(.secondary)
             }.padding(14)
         }
+        .transaction { $0.animation = nil; $0.disablesAnimations = true }
         .frame(minWidth: 740, minHeight: 480)
         .background(Color(nsColor: .windowBackgroundColor))
     }
