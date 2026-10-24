@@ -167,10 +167,10 @@ final class SnapshotReader: @unchecked Sendable {
 
 enum Console {
     static let cyan = Color(red: 0.35, green: 0.82, blue: 0.98)
-    static let background = Color(red: 0.055, green: 0.067, blue: 0.082)
-    static let panel = Color(red: 0.09, green: 0.105, blue: 0.125)
-    static let strip = Color(red: 0.068, green: 0.08, blue: 0.097)
-    static let line = Color.white.opacity(0.09)
+    static let background = Color(white: 0.065)
+    static let panel = Color(white: 0.115)
+    static let strip = Color(white: 0.085)
+    static let line = Color.white.opacity(0.08)
     static let muted = Color(red: 0.48, green: 0.54, blue: 0.61)
     static let fps = ["23.98", "24", "25", "29.97", "29.97 DF", "30", "50", "60"]
     static let outputs = ["L-IN", "L-OUT", "A-OUT", "N/A"]
@@ -181,22 +181,13 @@ enum Console {
 struct ConsoleButton: ButtonStyle {
     var active = false
     var color = Color(white: 0.74)
+    @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.font(.system(size: 11, weight: .semibold)).padding(.horizontal, 12).padding(.vertical, 9)
             .foregroundStyle(active ? Color.black : color)
             .background(active ? color : color.opacity(configuration.isPressed ? 0.22 : 0.08), in: RoundedRectangle(cornerRadius: 4))
             .overlay(RoundedRectangle(cornerRadius: 4).stroke(color.opacity(0.3)))
-            .opacity(configuration.isPressed ? 0.8 : 1)
-    }
-}
-struct Readout: View {
-    let title, value: String
-    var color: Color = Color(white: 0.85)
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.system(size: 9, weight: .semibold)).tracking(1.4).foregroundStyle(Console.muted)
-            Text(value).font(.system(size: 15, weight: .medium, design: .monospaced)).foregroundStyle(color)
-        }
+            .opacity(!enabled ? 0.35 : configuration.isPressed ? 0.8 : 1)
     }
 }
 struct StatusDot: View {
@@ -251,32 +242,36 @@ struct MainView: View {
     @State private var confirmTCOnly = false
     @State private var showingAudio = false
     @State private var showingTC = false
+    @AppStorage("consoleCompact") private var compact = false
+    @AppStorage("consoleProcessing") private var showProcessing = true
     private var connected: Int { store.snapshot.receivers.filter(\.connected).count }
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-            VStack(spacing: 0) {
+        VStack(spacing: 0) {
                 header
                 if page != "routing" { transport }
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 20) {
-                        if !store.failure.isEmpty { errorBanner(store.failure) }
-                        if !store.snapshot.error.isEmpty { errorBanner(store.snapshot.error) }
-                        if page == "routing" { MatrixView(store: store).disabled(store.settingsLocked) }
-                        else if page == "timeline" { RecordingTimeline(store: store) }
-                        else if page == "overview" {
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 400), spacing: 14, alignment: .top)], spacing: 14) {
-                                ForEach(store.snapshot.receivers) { ReceiverOverview(receiver: $0, store: store) }
-                            }
+                if page == "overview" {
+                    GeometryReader { geometry in
+                        let count = max(1, min(store.snapshot.receivers.count, Int((geometry.size.width - 20) / (compact ? 410 : 460))))
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 12) {
+                                errors
+                                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: count), spacing: 12) {
+                                    ForEach(store.snapshot.receivers) { ReceiverOverview(receiver: $0, store: store, compact: compact, showProcessing: showProcessing) }
+                                }
+                                if store.snapshot.receivers.isEmpty { ContentUnavailableView("接続なし", systemImage: "cable.connector") }
+                            }.padding(16)
                         }
-                        if store.snapshot.receivers.isEmpty && page == "overview" {
-                            ContentUnavailableView("接続なし", systemImage: "cable.connector")
-                        }
-
-                    }.padding(24)
+                    }
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            errors
+                            if page == "routing" { MatrixView(store: store).disabled(store.settingsLocked) }
+                            else { RecordingTimeline(store: store) }
+                        }.padding(16)
+                    }
                 }
                 footer
-            }
         }
         .frame(minWidth: 1060, minHeight: 730)
         .background(Console.background).foregroundStyle(Color(white: 0.88))
@@ -287,89 +282,76 @@ struct MainView: View {
             Button("適用", action: applyTC)
         } message: { Text("L-OUT では USB 全4chがTC信号になります。") }
     }
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 26) {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) { Rectangle().fill(Console.cyan).frame(width: 3, height: 25); Text("MIC 3 BRIDGE").font(.system(size: 18, weight: .bold)).tracking(1) }
-            }.padding(.top, 10)
-            VStack(spacing: 5) {
-                nav("overview", "一覧", "square.grid.2x2")
-                nav("timeline", "タイムライン", "waveform.path")
-                nav("routing", "ルーティング", "point.3.connected.trianglepath.dotted")
-            }
-            Rectangle().fill(Console.line).frame(height: 1)
-            ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("SESSION TARGETS").font(.system(size: 9, weight: .semibold)).tracking(1.5).foregroundStyle(Console.muted)
-                ForEach(store.snapshot.receivers) { r in
-                    Button {
-                        if store.excluded.contains(r.serial) { store.excluded.remove(r.serial) } else { store.excluded.insert(r.serial) }
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: store.excluded.contains(r.serial) ? "square" : "checkmark.square.fill").foregroundStyle(r.connected ? Color(white: 0.75) : Console.muted)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(r.name).font(.system(size: 10)).lineLimit(1)
-                                Text(String(r.serial.suffix(6))).font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
-                            }
-                            Spacer(minLength: 0)
-                            StatusDot(active: r.connected)
-                        }
-                    }.buttonStyle(.plain).disabled(!r.connected)
-                }
-                Button("接続中をすべて選択") { store.excluded.removeAll() }.font(.system(size: 10)).foregroundStyle(Color(white: 0.78)).buttonStyle(.plain)
-            }
-            }.scrollIndicators(.hidden)
-            VStack(alignment: .leading, spacing: 14) {
-                Readout(title: "MATRIX INPUT", value: "\(store.snapshot.bus_channels) CHANNELS")
-                Text(store.snapshot.bus_in_use ? "● DAW ACTIVE" : "○ DAW IDLE").font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
-            }
-        }.padding(20).frame(width: 198).frame(maxHeight: .infinity).background(Console.strip)
-            .overlay(alignment: .trailing) { Rectangle().fill(Console.line).frame(width: 1) }
+    @ViewBuilder private var errors: some View {
+        if !store.failure.isEmpty { errorBanner(store.failure) }
+        if !store.snapshot.error.isEmpty { errorBanner(store.snapshot.error) }
     }
-    private func nav(_ id: String, _ title: String, _ icon: String) -> some View {
+    private func nav(_ id: String, _ title: String, _ icon: String, _ key: KeyEquivalent) -> some View {
         Button { page = id } label: {
-            HStack(spacing: 10) { Image(systemName: icon).frame(width: 18); Text(title).font(.system(size: 12, weight: .medium)); Spacer() }
-                .foregroundStyle(page == id ? Color(white: 0.9) : Console.muted).padding(12)
-                .background(page == id ? Color.white.opacity(0.04) : .clear, in: RoundedRectangle(cornerRadius: 4))
-                .overlay(alignment: .leading) { if page == id { Rectangle().fill(Console.cyan).frame(width: 2, height: 18) } }
-        }.buttonStyle(.plain)
+            Label(title, systemImage: icon).font(.system(size: 11, weight: .semibold))
+                .padding(.horizontal, 14).frame(height: 42)
+                .foregroundStyle(page == id ? Color.white : Console.muted)
+                .background(page == id ? Color.white.opacity(0.06) : .clear)
+                .overlay(alignment: .bottom) { if page == id { Rectangle().fill(Console.cyan).frame(height: 2) } }
+        }.buttonStyle(.plain).keyboardShortcut(key, modifiers: .command)
     }
     private var header: some View {
-        HStack(spacing: 18) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(["overview": "一覧", "timeline": "タイムライン", "routing": "ルーティング"][page] ?? "").font(.system(size: 22, weight: .light))
-            }
-            Spacer()
-            SessionRecordStatus(store: store)
+        HStack(spacing: 0) {
+            Text("MIC 3 BRIDGE").font(.system(size: 11, weight: .bold)).tracking(1.5).padding(.horizontal, 18)
+            nav("overview", "一覧", "slider.vertical.3", "1")
+            nav("timeline", "タイムライン", "waveform.path", "2")
+            nav("routing", "ルーティング", "point.3.connected.trianglepath.dotted", "3")
+            Spacer(minLength: 12)
+            SessionRecordStatus(store: store).padding(.trailing, 16)
+            Menu {
+                Button("接続中をすべて選択") { store.excluded.removeAll() }
+                Button("選択を解除") { store.excluded.formUnion(store.snapshot.receivers.map(\.serial)) }
+                Divider()
+                ForEach(store.snapshot.receivers) { r in
+                    Toggle(r.name, isOn: Binding(get: { !store.excluded.contains(r.serial) }, set: {
+                        if $0 { store.excluded.remove(r.serial) } else { store.excluded.insert(r.serial) }
+                    })).disabled(!r.connected)
+                }
+            } label: { Text("対象 \(store.targets.count) / \(connected) RX").font(.system(size: 10, weight: .medium, design: .monospaced)) }
+                .menuStyle(.borderlessButton).fixedSize().padding(.trailing, 18)
             Button { store.settingsLocked.toggle() } label: {
-                Image(systemName: store.settingsLocked ? "lock.fill" : "lock.open").foregroundStyle(store.settingsLocked ? Console.cyan : Console.muted)
-            }.buttonStyle(ConsoleButton()).accessibilityLabel(store.settingsLocked ? "設定ロックを解除" : "設定をロック")
-            Button("一括設定") { showingAudio = true }.buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty || store.settingsLocked)
-            Readout(title: "ONLINE", value: String(format: "%02d RX", connected))
-            Readout(title: "SELECTED", value: String(format: "%02d RX", store.targets.count))
-            Button { store.bulk("refresh_all") } label: { Image(systemName: "arrow.clockwise") }
-                .buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty || store.targetsBusy)
-        }.padding(.horizontal, 24).padding(.vertical, 20)
+                Label(store.settingsLocked ? "LOCK" : "設定", systemImage: store.settingsLocked ? "lock.fill" : "lock.open")
+            }.buttonStyle(ConsoleButton(active: store.settingsLocked, color: store.settingsLocked ? Console.cyan : Color(white: 0.74)))
+                .keyboardShortcut("l", modifiers: .command).accessibilityLabel(store.settingsLocked ? "設定ロックを解除" : "設定をロック").help("設定ロック ⌘L")
+            Button("一括設定") { showingAudio = true }.buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty || store.settingsLocked).padding(.horizontal, 8)
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+        }.padding(.trailing, 8).frame(height: 48).background(Console.strip)
             .overlay(alignment: .bottom) { Rectangle().fill(Console.line).frame(height: 1) }
     }
-    private var transport: some View {
+    @ViewBuilder private var transport: some View {
         HStack(spacing: 14) {
             Button {
                 if let tc = store.targets.first?.tc, tc.known { tcEnabled = tc.enabled; fps = tc.fps; outputMode = tc.output }
                 showingTC = true
             } label: { Label("TC", systemImage: "clock") }
-                .buttonStyle(ConsoleButton()).popover(isPresented: $showingTC) { tcPanel }
-            Rectangle().fill(Console.line).frame(width: 1, height: 22)
+                .buttonStyle(ConsoleButton()).popover(isPresented: $showingTC) { tcPanel }.help("タイムコード設定・Mac時刻へ同期")
+            if let receiver = store.targets.first ?? store.snapshot.receivers.first {
+                TransportTimecode(receiver: receiver, feed: store.feed(receiver.serial))
+            }
+            Spacer(minLength: 8)
             Picker("収録先", selection: $store.recordingMode) {
                 Text("Mac").tag("mac"); Text("本体").tag("device"); Text("両方").tag("both")
-            }.pickerStyle(.segmented).labelsHidden().frame(width: 190)
-            Spacer()
-            Button { recording(start: true) } label: { Label("一括収録開始", systemImage: "record.circle") }
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 166)
+            Button { recording(start: true) } label: { Label("一括収録", systemImage: "record.circle") }
                 .buttonStyle(ConsoleButton(active: true, color: .red)).disabled(store.targets.isEmpty || (store.recordingMode != "mac" && store.targetsBusy))
-            Button { recording(start: false) } label: { Label("停止", systemImage: "stop.fill") }
-                .buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty)
-        }.padding(.horizontal, 24).padding(.vertical, 12).background(Console.panel)
+            Button { recording(start: false) } label: { Image(systemName: "stop.fill").frame(width: 20) }
+                .buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty).accessibilityLabel("選択対象の収録を停止").help("選択対象の収録を停止")
+        }.padding(.horizontal, 16).padding(.vertical, 12).background(Console.panel)
             .overlay(alignment: .bottom) { Rectangle().fill(Console.line).frame(height: 1) }
+        if page == "overview" {
+            HStack(spacing: 10) {
+                Text("INPUTS").font(.system(size: 9, weight: .semibold)).tracking(1.5).foregroundStyle(Console.muted)
+                Text("\(connected) RX / \(store.snapshot.receivers.flatMap(\.transmitters).filter(\.connected).count) TX").font(.system(size: 10, design: .monospaced)).foregroundStyle(Console.muted)
+                Spacer()
+                Toggle("処理設定", isOn: $showProcessing).toggleStyle(.button).controlSize(.small).help("AGC・NC・EQ・Low Cut の表示")
+                Picker("表示密度", selection: $compact) { Text("標準").tag(false); Text("コンパクト").tag(true) }.pickerStyle(.segmented).labelsHidden().frame(width: 150)
+            }.padding(.horizontal, 16).frame(height: 38).background(Console.background)
+        }
     }
     private var tcPanel: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -402,8 +384,9 @@ struct MainView: View {
             Text(store.folder.path).font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted).lineLimit(1).truncationMode(.middle)
             Spacer()
             if !store.running { Button("再開") { Task { await store.start() } }.buttonStyle(ConsoleButton()) }
+            Text("MATRIX \(store.snapshot.bus_channels) CH").font(.system(size: 9, design: .monospaced)).foregroundStyle(store.snapshot.bus_in_use ? Console.cyan : Console.muted)
             Text("CAF / 32-BIT FLOAT").font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
-        }.padding(.horizontal, 20).padding(.vertical, 12).background(Console.strip)
+        }.padding(.horizontal, 16).padding(.vertical, 8).background(Console.strip)
     }
     private func errorBanner(_ message: String) -> some View {
         Label(message, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(.orange).textSelection(.enabled)

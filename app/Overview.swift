@@ -4,6 +4,8 @@ import AppKit
 struct ReceiverOverview: View {
     let receiver: Receiver
     @ObservedObject var store: MicStore
+    var compact = false
+    var showProcessing = true
     @State private var editingName = false
     @State private var name = ""
     var body: some View {
@@ -31,11 +33,11 @@ struct ReceiverOverview: View {
                     Button("登録を削除", role: .destructive) { store.send("delete", receiver: receiver) }.disabled(!receiver.can_delete || store.settingsLocked)
                 } label: { Image(systemName: "ellipsis").frame(width: 16, height: 20) }.menuStyle(.borderlessButton).fixedSize()
 
-            }.font(.system(size: 9, weight: .semibold, design: .monospaced)).padding(12)
+            }.font(.system(size: 9, weight: .semibold, design: .monospaced)).padding(.horizontal, 12).frame(height: 44)
             HStack { LosslessControl(receiver: receiver, store: store); Spacer(); BatteryIndicator(code: receiver.battery_code, connected: receiver.connected, charging: receiver.charging).accessibilityLabel("レシーバー電池") }.padding(.horizontal, 12).padding(.bottom, 10)
             HStack(spacing: 1) {
                 ForEach(receiver.transmitters) { tx in
-                    CompactChannel(tx: tx, receiver: receiver, store: store)
+                    CompactChannel(tx: tx, receiver: receiver, store: store, compact: compact, showProcessing: showProcessing)
                 }
             }.background(Console.line)
             HStack {
@@ -43,9 +45,10 @@ struct ReceiverOverview: View {
                 Spacer()
                 LiveTimecode(receiver: receiver, feed: store.feed(receiver.serial))
                 Text(Console.fpsName(receiver.tc.fps))
-            }.font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted).padding(10)
+            }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Console.muted).padding(.horizontal, 12).frame(height: 34)
             if !receiver.error.isEmpty { Text(receiver.error).font(.caption).foregroundStyle(.orange).padding(8) }
-        }.background(Console.panel).clipShape(RoundedRectangle(cornerRadius: 4))
+        }.background(Console.panel).clipShape(RoundedRectangle(cornerRadius: 3))
+            .overlay(RoundedRectangle(cornerRadius: 3).stroke(receiver.connected ? Console.line : Console.muted.opacity(0.2), lineWidth: 1))
             .sheet(isPresented: $editingName) {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("仮想入力の名前").font(.headline)
@@ -62,35 +65,66 @@ struct CompactChannel: View {
     let receiver: Receiver
     @ObservedObject var store: MicStore
     @State private var editing = false
-    @State private var draft = ""
+    var compact = false
+    var showProcessing = true
+    @State private var processing = false
+    private var meterHeight: Double { compact ? 180 : 250 }
+    private var destinations: [Int] {
+        store.snapshot.routes.enumerated().compactMap { offset, route in
+            offset < store.snapshot.bus_channels && route?.serial == receiver.serial && route?.channel == tx.index ? offset + 1 : nil
+        }
+    }
+    private var storage: String {
+        guard tx.connected, tx.storage_total > 0, (0...tx.storage_total).contains(tx.storage_remaining) else { return "—" }
+        return String(format: "%.0f%%", Double(tx.storage_remaining) / Double(tx.storage_total) * 100)
+    }
     var body: some View {
-        VStack(spacing: 8) {
-            HStack { Text("CH \(tx.index)"); Spacer(); StatusDot(active: tx.connected) }.font(.system(size: 9, design: .monospaced))
-            Button { draft = tx.label; editing = true } label: {
-                Text(tx.label.isEmpty ? "—" : tx.label).font(.system(size: 11, weight: .medium)).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-            }.buttonStyle(.plain).popover(isPresented: $editing) {
+        VStack(spacing: compact ? 7 : 10) {
+            HStack {
+                Text(String(format: "%02d", tx.index)).font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(tx.connected ? Color(white: 0.9) : Console.muted)
+                Spacer(); StatusDot(active: tx.connected)
+            }.frame(height: 18)
+            Button { editing = true } label: {
+                Text(tx.label.isEmpty ? "—" : tx.label).font(.system(size: compact ? 11 : 13, weight: .semibold))
+                    .lineLimit(1).frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
+            }.buttonStyle(.plain).help("人物ラベル・マイクの引き継ぎ").popover(isPresented: $editing) {
                 LabelEditor(tx: tx, receiver: receiver, store: store)
             }
             HStack(alignment: .top, spacing: 1) {
-                ProductionMeter(feed: store.feed(receiver.serial), channel: tx.index - 1)
-                GainControl(tx: tx, receiver: receiver, store: store, compact: true)
+                ProductionMeter(feed: store.feed(receiver.serial), channel: tx.index - 1, height: meterHeight)
+                GainControl(tx: tx, receiver: receiver, store: store, height: meterHeight, compact: compact)
             }
             Button {
                 store.send("device_record_tx", receiver: receiver, values: ["target": String(tx.index), "tx_serial": tx.serial, "value": tx.device_recording ? "0" : "1"])
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: tx.connected && tx.device_recording ? "stop.fill" : "record.circle")
-                    Text(!tx.connected ? "OFFLINE" : tx.device_recording ? "TX REC" : "TX STOP")
-                }.frame(maxWidth: .infinity, minHeight: 22)
+                    Text(!tx.connected ? "OFFLINE" : "REC")
+                }.frame(maxWidth: .infinity, minHeight: compact ? 24 : 28)
             }.buttonStyle(.plain).foregroundStyle(tx.connected ? Color.red : Console.muted)
                 .background(tx.connected && tx.device_recording ? Color.red.opacity(0.1) : Color.clear).clipShape(RoundedRectangle(cornerRadius: 3))
                 .disabled(!tx.connected || tx.serial.isEmpty)
                 .accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) 本体録音\(tx.device_recording ? "停止" : "開始")")
             BatteryIndicator(code: tx.battery_code, connected: tx.connected, charging: tx.charging)
-            Text(tx.connected && tx.storage_total > 0 && tx.storage_remaining >= 0 && tx.storage_remaining <= tx.storage_total ? String(format: "空 %.0f%%", Double(tx.storage_remaining) / Double(tx.storage_total) * 100) : "空 —")
-                .foregroundStyle(Console.muted)
-            ProcessingControls(tx: tx, receiver: receiver, store: store)
-        }.font(.system(size: 8, design: .monospaced)).padding(6).frame(maxWidth: .infinity).background(Console.strip)
+            HStack(spacing: 4) { Image(systemName: "internaldrive"); Text(storage) }.foregroundStyle(Console.muted).help("本体ストレージの空き容量")
+            Rectangle().fill(Console.line).frame(height: 1)
+            if showProcessing {
+                ProcessingControls(tx: tx, receiver: receiver, store: store)
+            } else {
+                Button { processing = true } label: { Label("処理", systemImage: "slider.horizontal.3").frame(maxWidth: .infinity, minHeight: 22) }
+                    .buttonStyle(.plain).foregroundStyle(Console.muted).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) 処理設定").popover(isPresented: $processing) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("CH \(tx.index) · \(tx.label.isEmpty ? String(receiver.serial.suffix(6)) : tx.label)").font(.headline)
+                            ProcessingControls(tx: tx, receiver: receiver, store: store)
+                            Text(tx.serial.isEmpty ? "—" : tx.serial).font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted).textSelection(.enabled)
+                        }.padding(18).frame(width: 230)
+                    }
+            }
+            Text(destinations.isEmpty ? "M —" : "M " + destinations.prefix(2).map { String(format: "%02d", $0) }.joined(separator: ",") + (destinations.count > 2 ? "+" : ""))
+                .font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(Console.muted)
+                .help(destinations.isEmpty ? "共通入力への割り当てなし" : "共通入力: " + destinations.map { "CH \($0)" }.joined(separator: ", "))
+        }.font(.system(size: 9, design: .monospaced)).padding(.horizontal, compact ? 8 : 12).padding(.vertical, 10).frame(maxWidth: .infinity).background(Console.strip)
     }
 }
 

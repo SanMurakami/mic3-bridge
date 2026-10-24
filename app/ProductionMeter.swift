@@ -93,3 +93,18 @@ struct LiveTimecode: View {
     }
     var body: some View { Text(value).monospacedDigit().accessibilityLabel("TC \(receiver.serial.suffix(6))").accessibilityValue(value) }
 }
+
+struct TransportTimecode: View {
+    let receiver: Receiver
+    @ObservedObject var feed: ReceiverFeed
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            LiveTimecode(receiver: receiver, feed: feed)
+                .font(.system(size: 21, weight: .medium, design: .monospaced)).foregroundStyle(Color(white: 0.9))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(String(receiver.serial.suffix(6)))
+                Text("\(Console.fpsName(receiver.tc.fps)) FPS")
+            }.font(.system(size: 8, design: .monospaced)).foregroundStyle(Console.muted)
+        }.fixedSize()
+    }
+}
