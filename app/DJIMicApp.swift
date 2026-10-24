@@ -2,18 +2,24 @@ import SwiftUI
 import AppKit
 import AVFoundation
 
+struct Transmitter: Decodable, Identifiable, Equatable { var id: Int { index }; let index: Int; let noise_mode: String }
 struct Receiver: Decodable, Identifiable, Equatable {
     var id: String { serial }
     let serial, name, firmware, status, virtual_uid, usb_location, recording_path, error: String
-    let connected, recording: Bool
+    let connected, recording, can_delete, control_busy: Bool
+    let transmitters: [Transmitter]
     let meters: [Double]
     let recorded_seconds: Double
     let dropped: UInt64
 }
+struct MatrixRoute: Codable, Equatable { var serial: String; var channel: Int }
 struct Snapshot: Decodable {
     var receivers: [Receiver] = []
     var unidentified = 0
     var error = ""
+    var bus_channels = 16
+    var bus_in_use = false
+    var routes: [MatrixRoute?] = []
 }
 
 @MainActor final class MicStore: ObservableObject {
@@ -41,6 +47,7 @@ struct Snapshot: Decodable {
     }
     func start() async {
         guard process == nil else { return }
+        NSLog("DJI Mic 起動: マイク権限=%ld", AVCaptureDevice.authorizationStatus(for: .audio).rawValue)
         let allowed: Bool
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized: allowed = true
@@ -85,11 +92,14 @@ struct Snapshot: Decodable {
         }
         do {
             try child.run(); process = child; input = outgoing; output = incoming; stderr = errors; running = true
-        } catch { failure = error.localizedDescription }
+        } catch { failure = error.localizedDescription; NSLog("DJI Mic 起動失敗: %@", failure) }
     }
     func stop() { stopping = true; process?.terminate() }
     func send(_ op: String, receiver: Receiver, values: [String: String] = [:]) {
-        var command = values; command["op"] = op; command["serial"] = receiver.serial
+        var command = values; command["serial"] = receiver.serial; send(op, values: command)
+    }
+    func send(_ op: String, values: [String: String] = [:]) {
+        var command = values; command["op"] = op
         do {
             var data = try JSONSerialization.data(withJSONObject: command); data.append(10)
             try input?.fileHandleForWriting.write(contentsOf: data)
@@ -139,6 +149,9 @@ struct ReceiverCard: View {
                 Text(receiver.status).font(.caption).foregroundStyle(receiver.connected ? .green : .secondary)
                 Button("名前を変更", systemImage: "pencil") { draft = receiver.name; editing = true }
                     .labelStyle(.iconOnly).help("各アプリに表示する入力名を変更")
+                Button("登録を削除", systemImage: "trash", role: .destructive) { store.send("delete", receiver: receiver) }
+                    .labelStyle(.iconOnly).disabled(!receiver.can_delete)
+                    .help(receiver.can_delete ? "一覧と各ソフトの仮想入力から登録を削除。録音ファイルは残ります。再接続すると新規登録します。" : "USB 未接続で、DAW などが入力を使っていないときに削除できます")
             }
             HStack(spacing: 18) {
                 ForEach(0..<4) { ch in
@@ -174,6 +187,18 @@ struct ReceiverCard: View {
                 }
                 Text("4ch · 48 kHz 仮想入力").font(.caption).foregroundStyle(.secondary)
             }
+            HStack {
+                Text("ノイキャン").font(.caption).foregroundStyle(.secondary)
+                ForEach(receiver.transmitters) { tx in
+                    Picker("TX \(tx.index)", selection: Binding(get: { tx.noise_mode }, set: { mode in
+                        store.send("noise", receiver: receiver, values: ["target":String(tx.index),"mode":mode])
+                    })) { Text("NONE").tag("none");Text("BASIC").tag("basic");Text("STRONG").tag("strong");if tx.noise_mode == "unknown" { Text("未確認").tag("unknown") } }
+                    .frame(width: 165).disabled(receiver.control_busy || !receiver.connected)
+                }
+                Spacer()
+                if receiver.control_busy { ProgressView().controlSize(.small) }
+                Button("状態を更新", systemImage: "arrow.clockwise") { store.send("refresh_controls", receiver: receiver) }.font(.caption).disabled(!receiver.connected || receiver.control_busy)
+            }
             if !receiver.error.isEmpty { Label(receiver.error, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
             if receiver.dropped > 0 { Text("転送待ちの上限に達した音声ブロック: \(receiver.dropped)").font(.caption).foregroundStyle(.orange) }
         }
@@ -190,6 +215,51 @@ struct ReceiverCard: View {
                         .keyboardShortcut(.defaultAction).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }.padding(24).frame(width: 440)
+        }
+    }
+}
+
+struct MatrixView: View {
+    @ObservedObject var store: MicStore
+    @State private var expanded = false
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("DJI Mic3 Matrix").font(.headline)
+                    Spacer()
+                    Picker("共通入力", selection: Binding(get: { store.snapshot.bus_channels }, set: { store.send("bus_channels", values: ["channels": String($0)]) })) {
+                        ForEach([4,8,16,32,64], id: \.self) { Text("\($0)ch").tag($0) }
+                    }.frame(width: 180).disabled(store.snapshot.bus_in_use)
+                }
+                Text(store.snapshot.bus_in_use ? "DAW が使用中です。入力とチャンネル数を維持しています。" : "チャンネル数の変更は DAW の入力を停止してから行ってください。")
+                    .font(.caption).foregroundStyle(.secondary)
+                DisclosureGroup("チャンネルの割り当て", isExpanded: $expanded) {
+                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
+                        ForEach(0..<store.snapshot.bus_channels, id: \.self) { destination in
+                            let route = destination < store.snapshot.routes.count ? store.snapshot.routes[destination] : nil
+                            GridRow {
+                                Text("CH \(destination+1)").font(.callout.monospacedDigit()).frame(width: 52, alignment: .leading)
+                                Picker("入力元", selection: Binding(get: { route?.serial ?? "" }, set: { serial in
+                                    store.send("route", values: ["destination":String(destination+1),"source_serial":serial,"channel":String(route?.channel ?? 1)])
+                                })) {
+                                    Text("無音").tag("")
+                                    ForEach(store.snapshot.receivers) { r in Text("\(r.name)  [\(r.serial)]").tag(r.serial) }
+                                    if let route, !store.snapshot.receivers.contains(where: { $0.serial == route.serial }) {
+                                        Text("\(route.serial)（未登録）").tag(route.serial)
+                                    }
+                                }.labelsHidden().frame(maxWidth: .infinity)
+                                Picker("機器のチャンネル", selection: Binding(get: { route?.channel ?? 1 }, set: { channel in
+                                    store.send("route", values: ["destination":String(destination+1),"source_serial":route?.serial ?? "","channel":String(channel)])
+                                })) { ForEach(1...4,id: \.self) { Text("CH \($0)").tag($0) } }
+                                .labelsHidden().frame(width: 90).disabled(route == nil)
+                            }
+                        }
+                    }.padding(.top, 10)
+                }
+                Text("割り当ては本体シリアルで保存します。抜き差しでは変更せず、未接続の入力元は無音になります。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.padding(6)
         }
     }
 }
@@ -217,9 +287,10 @@ struct MainView: View {
                     if store.snapshot.receivers.isEmpty {
                         ContentUnavailableView("レシーバーを接続", systemImage: "mic", description: Text("DJI Mic 3 を USB で接続すると自動登録します。ポートを変えても同じ個体の入力へ戻ります。"))
                     }
+                    MatrixView(store: store)
                     ForEach(store.snapshot.receivers) { receiver in ReceiverCard(receiver: receiver, store: store) }
                     GroupBox("機器側の制御") {
-                        Text("ノイキャン・本体録音・TC の変更は、Mic 3 のコマンドを解析中です。現在の録音ボタンは Mac 側への保存です。")
+                        Text("ノイキャンは各 TX の NONE / BASIC / STRONG を変更できます。本体録音・TC の変更は解析中です。録音ボタンは Mac 側への保存です。")
                             .font(.callout).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(6)
                     }
                 }.padding(24)
@@ -243,16 +314,17 @@ struct MainView: View {
 }
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
-    var store: MicStore?
-    func applicationWillTerminate(_ notification: Notification) { store?.stop() }
+    let store = MicStore()
+    func applicationDidFinishLaunching(_ notification: Notification) { Task { await store.start() } }
+    func applicationWillTerminate(_ notification: Notification) { store.stop() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 @main struct DJIMicApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @StateObject private var store = MicStore()
+    private var store: MicStore { delegate.store }
     var body: some Scene {
         Window("DJI Mic 3 Bridge", id: "main") {
-            MainView(store: store).task { delegate.store = store; await store.start() }
+            MainView(store: store)
         }.defaultSize(width: 880, height: 650)
         MenuBarExtra("DJI Mic 3 Bridge", systemImage: "mic.fill") {
             MenuContent(store: store)

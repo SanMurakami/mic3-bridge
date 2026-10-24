@@ -38,11 +38,11 @@ static inline void DJIWrite(DJITimeline *ring,const DJIPacket *p,double hostFreq
         atomic_store_explicit(&cell->tag,frame+1,memory_order_seq_cst);
     }
 }
-static inline void DJIRead(DJITimeline *ring,uint64_t begin,uint32_t count,float *out) {
+static inline void DJIReadStrided(DJITimeline *ring,uint64_t begin,uint32_t count,float *out,unsigned stride,unsigned offset) {
     for(uint32_t i=0;i<count;i++) {
         uint64_t frame=begin+i,tag=frame+1;
         DJIFrame *cell=&ring->frames[frame%DJI_RING_FRAMES];
-        float *dst=out+i*DJI_CHANNELS;
+        float *dst=out+i*stride+offset;
         memset(dst,0,DJI_CHANNELS*sizeof(float));
         if(atomic_load_explicit(&cell->tag,memory_order_seq_cst)!=tag) continue;
         for(unsigned ch=0;ch<DJI_CHANNELS;ch++) {
@@ -50,5 +50,15 @@ static inline void DJIRead(DJITimeline *ring,uint64_t begin,uint32_t count,float
             memcpy(dst+ch,&bits,sizeof(bits));
         }
         if(atomic_load_explicit(&cell->tag,memory_order_seq_cst)!=tag) memset(dst,0,DJI_CHANNELS*sizeof(float));
+    }
+}
+
+static inline void DJIRead(DJITimeline *ring,uint64_t begin,uint32_t count,float *out){DJIReadStrided(ring,begin,count,out,DJI_CHANNELS,0);}
+
+// 行列の 1 出力 ch を、元入力の指定 ch から読む。タグを前後で検証する。
+static inline void DJIReadChannel(DJITimeline *ring,uint64_t begin,uint32_t count,float *out,unsigned stride,unsigned destination,unsigned source){
+    for(uint32_t i=0;i<count;i++){DJIFrame *cell=&ring->frames[(begin+i)%DJI_RING_FRAMES];uint64_t tag=begin+i+1;float value=0;
+        if(atomic_load(&cell->tag)==tag){uint32_t bits=atomic_load(&cell->samples[source]);memcpy(&value,&bits,sizeof(value));if(atomic_load(&cell->tag)!=tag)value=0;}
+        out[i*stride+destination]=value;
     }
 }

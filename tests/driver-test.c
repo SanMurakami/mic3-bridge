@@ -58,6 +58,24 @@ int main(void) {
     assert(IO(DriverRef,DeviceB,StreamB,1,kAudioServerPlugInIOOperationReadInput,64,&info,second,NULL)==noErr);
     assert(IO(DriverRef,DeviceA,StreamA,2,kAudioServerPlugInIOOperationReadInput,64,&info,repeat,NULL)==noErr);
     for(unsigned i=0;i<64*4;i++){assert(first[i]==.125f*(i%4+1));assert(second[i]==-first[i]);assert(repeat[i]==first[i]);}
+    // 16ch 共通入力: CH1 <- A の CH3、CH6 <- B の CH1。残りは無音。
+    CFMutableArrayRef matrix=CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);CFDictionaryRef emptyRoute=CFDictionaryCreate(NULL,NULL,NULL,0,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);for(int ch=0;ch<16;ch++)CFArrayAppendValue(matrix,emptyRoute);CFRelease(emptyRoute);
+    for(int which=0;which<2;which++){int channel=which?0:2;CFNumberRef number=CFNumberCreate(NULL,kCFNumberIntType,&channel);
+        const void *keys[]={CFSTR("uid"),CFSTR("channel")},*values[]={slot(which?DeviceB:DeviceA)->uid,number};
+        CFDictionaryRef route=CFDictionaryCreate(NULL,keys,values,2,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);CFArraySetValueAtIndex(matrix,which?5:0,route);CFRelease(route);CFRelease(number);}
+    int channels=16;CFNumberRef number=CFNumberCreate(NULL,kCFNumberIntType,&channels);
+    const void *busKeys[]={CFSTR("uid"),CFSTR("name"),CFSTR("channels"),CFSTR("routes")},*busValues[]={CFSTR(DJI_BUS_UID),CFSTR("Matrix"),number,matrix};
+    CFDictionaryRef busRow=CFDictionaryCreate(NULL,busKeys,busValues,4,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    CFArrayRef busRows=CFArrayCreate(NULL,(const void**)&busRow,1,&kCFTypeArrayCallBacks);assert(configure(busRows)==noErr);
+    CFArrayRef persisted=description();assert(CFPropertyListIsValid(persisted,kCFPropertyListBinaryFormat_v1_0));CFRelease(persisted);
+    AudioObjectID bus=NextID-2;float combined[64*16];assert(IO(DriverRef,bus,bus+1,1,kAudioServerPlugInIOOperationReadInput,64,&info,combined,NULL)==noErr);
+    for(int f=0;f<64;f++)for(int ch=0;ch<16;ch++)assert(combined[f*16+ch]==(ch==0?.375f:ch==5?-.125f:0));
+    a=(AudioObjectPropertyAddress){kAudioStreamPropertyVirtualFormat,kAudioObjectPropertyScopeGlobal,0};AudioStreamBasicDescription busFormat;
+    assert(Get(DriverRef,bus+1,0,&a,0,NULL,sizeof(busFormat),&used,&busFormat)==noErr&&busFormat.mChannelsPerFrame==16&&busFormat.mBytesPerFrame==64);
+    a.mSelector=DJI_REMOVE_SELECTOR;CFStringRef busUID=CFSTR(DJI_BUS_UID);assert(Start(DriverRef,bus,1)==noErr);
+    assert(Set(DriverRef,Plugin,0,&a,0,NULL,sizeof(busUID),&busUID)==kAudioHardwareIllegalOperationError);assert(Stop(DriverRef,bus,1)==noErr);
+    assert(Set(DriverRef,Plugin,0,&a,0,NULL,sizeof(busUID),&busUID)==noErr);
+    CFRelease(busRows);CFRelease(busRow);CFRelease(number);CFRelease(matrix);
     putPacket(DeviceA,&packet,bytes-4,kAudioHardwareBadPropertySizeError);
     packet.frames=UINT32_MAX;putPacket(DeviceA,&packet,bytes,kAudioHardwareBadPropertySizeError);packet.frames=1024;
     packet.sourceRate=NAN;putPacket(DeviceA,&packet,bytes,kAudioHardwareBadPropertySizeError);packet.sourceRate=48000;
@@ -76,5 +94,23 @@ int main(void) {
     assert(Zero(DriverRef,DeviceA,1,&sample,&host,&seed)==noErr);uint64_t previousSeed=seed;
     assert(Stop(DriverRef,DeviceA,1)==noErr);assert(Start(DriverRef,DeviceA,1)==noErr);
     assert(Zero(DriverRef,DeviceA,1,&sample,&host,&seed)==noErr&&seed>previousSeed);
-    puts("driver: 独立した入力・複数読者・無音・不正 packet・リセット・レート変換・clock 再開 OK");
+    // 登録解除は公開一覧と保存対象から消え、旧 reader は無音を返す。
+    CFStringRef removedUID=CFRetain(slot(DeviceA)->uid);a=(AudioObjectPropertyAddress){DJI_REMOVE_SELECTOR,kAudioObjectPropertyScopeGlobal,0};
+    assert(Set(DriverRef,Plugin,0,&a,0,NULL,sizeof(removedUID),&removedUID)==kAudioHardwareIllegalOperationError);
+    assert(countDevices()==12);assert(Stop(DriverRef,DeviceA,1)==noErr);
+    assert(Set(DriverRef,Plugin,0,&a,0,NULL,sizeof(removedUID),&removedUID)==noErr);
+    assert(countDevices()==11);CFArrayRef saved=description();assert(CFArrayGetCount(saved)==11);CFRelease(saved);
+    assert(IO(DriverRef,DeviceA,StreamA,1,kAudioServerPlugInIOOperationReadInput,64,&info,first,NULL)==noErr);
+    for(unsigned i=0;i<64*4;i++)assert(first[i]==0);
+    assert(Stop(DriverRef,DeviceA,1)==noErr);
+    assert(Start(DriverRef,DeviceA,1)==kAudioHardwareIllegalOperationError);
+    // 二重削除は安全。再接続時は同じ UID と新しい object ID で登録できる。
+    assert(Set(DriverRef,Plugin,0,&a,0,NULL,sizeof(removedUID),&removedUID)==noErr);
+    const void *againValues[]={removedUID,CFSTR("再登録")};
+    CFDictionaryRef again=CFDictionaryCreate(NULL,renameKeys,againValues,2,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
+    CFArrayRef againRows=CFArrayCreate(NULL,(const void**)&again,1,&kCFTypeArrayCallBacks);assert(configure(againRows)==noErr);CFRelease(againRows);CFRelease(again);
+    assert(countDevices()==12);a.mSelector=kAudioPlugInPropertyTranslateUIDToDevice;AudioObjectID newID=0;
+    assert(Get(DriverRef,Plugin,0,&a,sizeof(removedUID),&removedUID,sizeof(newID),&used,&newID)==noErr&&newID!=DeviceA&&newID!=0);
+    CFRelease(removedUID);
+    puts("driver: 登録解除・再登録・旧 reader の無音・ 独立した入力・複数読者・無音・不正 packet・リセット・レート変換・clock 再開 OK");
 }

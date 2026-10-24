@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include <functional>
 namespace dji {
 struct Identity {std::string serial,firmware;};
 inline uint8_t crc8(const uint8_t *p,size_t n){uint8_t c=0x77;for(size_t i=0;i<n;i++){c^=p[i];for(int j=0;j<8;j++)c=c&1?(c>>1)^0x8c:c>>1;}return c;}
@@ -38,6 +39,7 @@ class IdentityParser {
     }
 public:
     Identity identity;
+    std::function<void(const uint8_t*,size_t)> onFrame;
     unsigned validFrames=0,rejectedFrames=0;
     void append(const uint8_t *data,size_t size) {
         // USB の packet 境界と DUML の frame 境界は一致しない。
@@ -51,7 +53,7 @@ public:
                 if(buffer.size()<n)break;
                 uint16_t expected=buffer[n-2]|((uint16_t)buffer[n-1]<<8);
                 if(crc16(buffer.data(),n-2)!=expected){rejectedFrames++;buffer.erase(buffer.begin());continue;}
-                validFrames++;frame(buffer.data(),n);buffer.erase(buffer.begin(),buffer.begin()+n);
+                validFrames++;frame(buffer.data(),n);if(onFrame)onFrame(buffer.data(),n);buffer.erase(buffer.begin(),buffer.begin()+n);
             }
             if(buffer.size()>1023){buffer.clear();rejectedFrames++;}
         }

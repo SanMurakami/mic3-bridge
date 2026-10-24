@@ -8,7 +8,9 @@
 #define DJI_PACKET_SELECTOR ((uint32_t)0x646a6970) /* djip */
 #define DJI_RESET_SELECTOR ((uint32_t)0x646a6972)  /* djir */
 #define DJI_DEVICES_SELECTOR ((uint32_t)0x646a6963) /* djic: 登録済みの個体一覧 */
+#define DJI_REMOVE_SELECTOR ((uint32_t)0x646a6978) /* djix: 明示的な登録解除 */
 #define DJI_STATUS_SELECTOR ((uint32_t)0x646a6973) /* djis */
+#define DJI_BUS_UID "local.dji-mic.input.matrix"
 typedef struct {
     uint32_t version, frames, channels, reserved;
     uint64_t hostTime;

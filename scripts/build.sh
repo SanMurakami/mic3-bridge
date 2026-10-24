@@ -15,10 +15,13 @@ clang++ -std=c++17 -O2 -fobjc-arc -Wall -Wextra -Werror \
     -framework CoreAudio -framework CoreFoundation -framework Foundation -framework AVFoundation -framework IOKit -framework IOUSBHost -framework AudioToolbox \
     "$repo_dir/bridge/Bridge.mm" -o "$app_dir/MacOS/dji-mic-bridge" \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$repo_dir/packaging/Bridge-Info.plist"
+clang++ -std=c++17 -O2 -fobjc-arc -Wall -Wextra -Werror -framework Foundation -framework IOKit -framework IOUSBHost \
+    "$repo_dir/bridge/MicControl.mm" -o "$app_dir/MacOS/dji-mic-control"
 swiftc -O -parse-as-library -warnings-as-errors -framework SwiftUI -framework AppKit -framework AVFoundation \
     "$repo_dir/app/DJIMicApp.swift" -o "$app_dir/MacOS/DJIMicBridge"
 cp "$repo_dir/packaging/Bridge-Info.plist" "$app_dir/Info.plist"
 codesign --force --sign - "$build_dir/DJIMicInputs.driver"
 codesign --force --sign - "$app_dir/MacOS/dji-mic-bridge"
+codesign --force --sign - "$app_dir/MacOS/dji-mic-control"
 codesign --force --sign - "$build_dir/DJI Mic Bridge.app"
 printf 'ビルド完了: %s\n' "$build_dir"
