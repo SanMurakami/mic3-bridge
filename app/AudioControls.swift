@@ -71,7 +71,7 @@ struct ProcessingControls: View {
                 if (tx.agc ?? -1) < 0 { Text("AGC · —").tag(-1) }
             }.disabled(!tx.connected || tx.serial.isEmpty || store.settingsLocked)
             Picker("ノイキャン TX\(tx.index)", selection: Binding(get: { tx.noise_mode }, set: {
-                store.send("noise", receiver: receiver, values: ["target": String(tx.index), "mode": $0])
+                store.send("noise", receiver: receiver, values: ["target": String(tx.index), "tx_serial": tx.serial, "mode": $0])
             })) {
                 Text("NC · OFF").tag("none"); Text("NC · BASIC").tag("basic"); Text("NC · STRONG").tag("strong")
                 if tx.noise_mode == "unknown" { Text("NC · —").tag("unknown") }
@@ -100,48 +100,6 @@ struct LosslessControl: View {
                 .font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(Console.cyan)
         }.toggleStyle(.switch).controlSize(.mini).tint(Console.cyan)
             .disabled(!receiver.connected || (receiver.lossless ?? -1) < 0 || store.settingsLocked)
-    }
-}
-struct BatchAudioPanel: View {
-    @ObservedObject var store: MicStore
-    @Environment(\.dismiss) private var dismiss
-    @State private var lossless = -1
-    @State private var agc = -1
-    @State private var noise = "keep"
-    @State private var eq = -1
-    @State private var lowCut = -1
-    private var changed: Bool { lossless >= 0 || agc >= 0 || noise != "keep" || eq >= 0 || lowCut >= 0 }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            HStack {
-                Text("一括設定").font(.system(size: 20, weight: .medium))
-                Spacer()
-                Text("\(store.targets.count) RX / \(store.targets.flatMap(\.transmitters).filter(\.connected).count) TX")
-                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(Console.muted)
-            }
-            VStack(spacing: 14) {
-                Picker("ロスレス無線伝送", selection: $lossless) { Text("変更しない").tag(-1); Text("OFF").tag(0); Text("ON · 48k / 24-bit").tag(1) }
-                Picker("自動ゲイン", selection: $agc) { Text("変更しない").tag(-1); Text("OFF").tag(0); Text("Automatic").tag(1); Text("Dynamic").tag(2) }
-                Picker("ノイキャン", selection: $noise) { Text("変更しない").tag("keep"); Text("OFF").tag("none"); Text("BASIC").tag("basic"); Text("STRONG").tag("strong") }
-                Picker("音質", selection: $eq) { Text("変更しない").tag(-1); Text("Regular").tag(0); Text("Rich").tag(1); Text("Bright").tag(2) }
-                Picker("Low Cut", selection: $lowCut) { Text("変更しない").tag(-1); Text("OFF").tag(0); Text("ON").tag(1) }
-            }.pickerStyle(.menu)
-            Divider()
-            ScrollView {
-                VStack(spacing: 10) {
-                    ForEach(store.targets) { r in
-                        HStack { StatusDot(active: true); Text(r.name).lineLimit(1); Spacer(); Text("\(r.transmitters.filter(\.connected).count) TX").foregroundStyle(Console.muted) }.font(.system(size: 11))
-                    }
-                }
-            }.frame(maxHeight: 100)
-            HStack {
-                Button("キャンセル") { dismiss() }.keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("選択RXへ適用") {
-                    store.bulk("audio_all", values: ["lossless": String(lossless), "agc": String(agc), "noise": noise, "eq": String(eq), "low_cut": String(lowCut)]); dismiss()
-                }.buttonStyle(ConsoleButton(active: true, color: Console.cyan)).disabled(!changed || store.targets.isEmpty || store.targetsBusy || store.settingsLocked)
-            }
-        }.padding(24).frame(width: 430).background(Console.panel)
     }
 }
 struct SessionRecordStatus: View {

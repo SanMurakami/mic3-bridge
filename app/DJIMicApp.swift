@@ -3,6 +3,8 @@ import AppKit
 import AVFoundation
 
 @MainActor final class MicStore: ObservableObject {
+    @Published var controlSelection: Set<ControlSelection> = []
+    @Published var inspectorVisible = false
     @Published var snapshot = Snapshot()
     @Published var failure = ""
     @Published var running = false
@@ -116,7 +118,7 @@ import AVFoundation
         var command = values; command["serial"] = receiver.serial; send(op, values: command)
     }
     func send(_ op: String, values: [String: String] = [:]) {
-        let guarded: Set<String> = ["gain", "agc", "eq", "low_cut", "lossless", "audio_all", "noise", "tc", "tc_all", "tc_sync_all", "route", "bus_channels", "delete", "rename"]
+        let guarded: Set<String> = ["setting", "gain", "agc", "eq", "low_cut", "lossless", "audio_all", "noise", "tc", "tc_all", "tc_sync_all", "route", "bus_channels", "delete", "rename"]
         guard !settingsLocked || !guarded.contains(op) else { return }
         var command = values; command["op"] = op
         do {
@@ -240,7 +242,6 @@ struct MainView: View {
     @State private var fps = 3
     @State private var outputMode = 3
     @State private var confirmTCOnly = false
-    @State private var showingAudio = false
     @State private var showingTC = false
     @AppStorage("consoleCompact") private var compact = false
     @AppStorage("consoleProcessing") private var showProcessing = true
@@ -250,6 +251,7 @@ struct MainView: View {
                 header
                 if page != "routing" { transport }
                 if page == "overview" {
+                    HStack(spacing: 0) {
                     GeometryReader { geometry in
                         let count = max(1, min(store.snapshot.receivers.count, Int((geometry.size.width - 20) / (compact ? 410 : 460))))
                         ScrollView {
@@ -261,6 +263,8 @@ struct MainView: View {
                                 if store.snapshot.receivers.isEmpty { ContentUnavailableView("接続なし", systemImage: "cable.connector") }
                             }.padding(16)
                         }
+                    }
+                    if store.inspectorVisible { Divider(); DeviceInspector(store: store) }
                     }
                 } else {
                     ScrollView {
@@ -276,7 +280,6 @@ struct MainView: View {
         .frame(minWidth: 1060, minHeight: 730)
         .background(Console.background).foregroundStyle(Color(white: 0.88))
         .tint(Color(white: 0.65)).preferredColorScheme(.dark)
-        .sheet(isPresented: $showingAudio) { BatchAudioPanel(store: store) }
         .alert("USB 音声を TC に切り替えます", isPresented: $confirmTCOnly) {
             Button("キャンセル", role: .cancel) { }
             Button("適用", action: applyTC)
@@ -318,8 +321,8 @@ struct MainView: View {
                 Label(store.settingsLocked ? "LOCK" : "設定", systemImage: store.settingsLocked ? "lock.fill" : "lock.open")
             }.buttonStyle(ConsoleButton(active: store.settingsLocked, color: store.settingsLocked ? Console.cyan : Color(white: 0.74)))
                 .keyboardShortcut("l", modifiers: .command).accessibilityLabel(store.settingsLocked ? "設定ロックを解除" : "設定をロック").help("設定ロック ⌘L")
-            Button("一括設定") { showingAudio = true }.buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty || store.settingsLocked).padding(.horizontal, 8)
-                .keyboardShortcut("b", modifiers: [.command, .shift])
+            Button { store.inspectorVisible.toggle() } label: { Label("インスペクター", systemImage: "sidebar.right") }
+                .buttonStyle(ConsoleButton(active: store.inspectorVisible)).keyboardShortcut("i", modifiers: [.command, .option])
         }.padding(.trailing, 8).frame(height: 48).background(Console.strip)
             .overlay(alignment: .bottom) { Rectangle().fill(Console.line).frame(height: 1) }
     }

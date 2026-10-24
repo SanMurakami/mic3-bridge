@@ -51,6 +51,16 @@ extension Receiver {
         assert(!manual.sameControls(as: Receiver(transmitters: [tx], waveform: [], tc: tc)))
         tx.agc = 0; tx.gain_db = -1
         assert(!manual.sameControls(as: Receiver(transmitters: [tx], waveform: [], tc: tc)))
+        // 選択はslotではなく実TX serial。移動した同じマイクに追従し、入れ替わった別個体は操作しない。
+        let selection: Set<ControlSelection> = [ControlSelection(receiver: "RX", transmitter: "TX")]
+        assert(Snapshot(receivers: [manual]).controlTargets(selection).first?.1?.index == 2)
+        let moved = Receiver(transmitters: [Transmitter(index: 4, label: "人物A")], waveform: [], tc: tc)
+        assert(Snapshot(receivers: [moved]).controlTargets(selection).first?.1?.index == 4)
+        assert(Snapshot(receivers: [base]).controlTargets(selection).isEmpty)
+        assert(Snapshot(receivers: [moved]).controlTargets([ControlSelection(receiver: "OTHER", transmitter: "TX")]).isEmpty)
+        assert(Snapshot(receivers: [moved]).controlTargets([ControlSelection(receiver: "RX")]).first?.1 == nil)
+        var settingsChanged = base; settingsChanged.settings = ["auto_off":1]
+        assert(!base.sameControls(as: settingsChanged))
         var meter = MeterState()
         meter.update(amplitude: 0.1, now: 1); assert(abs(meter.peak + 20) < 0.001)
         meter.update(amplitude: 0, now: 1.1); assert(meter.peak == -20 && meter.level < -20)

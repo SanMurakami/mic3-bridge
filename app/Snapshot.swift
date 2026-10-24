@@ -6,6 +6,7 @@ struct Transmitter: Decodable, Identifiable, Equatable {
     let serial, label_key, label, noise_mode: String
     let connected, charging, device_recording: Bool
     let battery_code, storage_total, storage_remaining: Int
+    var settings: [String: Int]? = nil
     var gain_db: Int? = nil
     var agc: Int? = nil
     var eq: Int? = nil
@@ -28,6 +29,7 @@ struct Receiver: Decodable, Identifiable, Equatable {
     let waveform: [WaveBin]?
     let recorded_seconds: Double
     let dropped: UInt64
+    var settings: [String: Int]? = nil
     var gain_db: Int? = nil
     var lossless: Int? = nil
 }
@@ -49,6 +51,19 @@ extension Snapshot {
 }
 extension Receiver {
     func sameControls(as r: Receiver) -> Bool {
-        serial == r.serial && name == r.name && firmware == r.firmware && status == r.status && virtual_uid == r.virtual_uid && usb_location == r.usb_location && recording_path == r.recording_path && error == r.error && control_message == r.control_message && connected == r.connected && recording == r.recording && can_delete == r.can_delete && control_busy == r.control_busy && charging == r.charging && battery_code == r.battery_code && tc == r.tc && transmitters == r.transmitters && dropped == r.dropped && gain_db == r.gain_db && lossless == r.lossless
+        serial == r.serial && name == r.name && firmware == r.firmware && status == r.status && virtual_uid == r.virtual_uid && usb_location == r.usb_location && recording_path == r.recording_path && error == r.error && control_message == r.control_message && connected == r.connected && recording == r.recording && can_delete == r.can_delete && control_busy == r.control_busy && charging == r.charging && battery_code == r.battery_code && tc == r.tc && transmitters == r.transmitters && dropped == r.dropped && gain_db == r.gain_db && lossless == r.lossless && settings == r.settings
+    }
+}
+
+struct ControlSelection: Hashable {
+    let receiver: String
+    var transmitter: String? = nil
+}
+extension Snapshot {
+    func controlTargets(_ selection: Set<ControlSelection>) -> [(Receiver, Transmitter?)] {
+        receivers.flatMap { rx -> [(Receiver, Transmitter?)] in
+            if selection.contains(ControlSelection(receiver: rx.serial)) { return [(rx, nil)] }
+            return rx.transmitters.filter { !$0.serial.isEmpty && selection.contains(ControlSelection(receiver: rx.serial, transmitter: $0.serial)) }.map { (rx, $0) }
+        }
     }
 }

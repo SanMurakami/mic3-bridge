@@ -15,7 +15,9 @@ struct ReceiverOverview: View {
                     if $0 { store.excluded.remove(receiver.serial) } else { store.excluded.insert(receiver.serial) }
                 })).toggleStyle(.checkbox).labelsHidden().disabled(!receiver.connected)
                 StatusDot(active: receiver.connected)
-                Text(receiver.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                Button { store.selectControl(ControlSelection(receiver: receiver.serial)) } label: {
+                    Text(receiver.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                }.buttonStyle(.plain).accessibilityLabel("RX \(receiver.serial.suffix(6)) を選択")
                 Spacer()
                 ProgressView().controlSize(.mini).opacity(receiver.control_busy ? 1 : 0).frame(width: 12)
                 Text(receiver.tc.enabled && receiver.tc.known ? (receiver.tc.output == 1 ? "USB TC×4" : "TC ON") : "TC OFF")
@@ -48,7 +50,7 @@ struct ReceiverOverview: View {
             }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Console.muted).padding(.horizontal, 12).frame(height: 34)
             if !receiver.error.isEmpty { Text(receiver.error).font(.caption).foregroundStyle(.orange).padding(8) }
         }.background(Console.panel).clipShape(RoundedRectangle(cornerRadius: 3))
-            .overlay(RoundedRectangle(cornerRadius: 3).stroke(receiver.connected ? Console.line : Console.muted.opacity(0.2), lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 3).stroke(store.controlSelection.contains(ControlSelection(receiver: receiver.serial)) ? Console.cyan.opacity(0.7) : receiver.connected ? Console.line : Console.muted.opacity(0.2), lineWidth: 1))
             .sheet(isPresented: $editingName) {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("仮想入力の名前").font(.headline)
@@ -80,11 +82,13 @@ struct CompactChannel: View {
     }
     var body: some View {
         VStack(spacing: compact ? 7 : 10) {
-            HStack {
-                Text(String(format: "%02d", tx.index)).font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(tx.connected ? Color(white: 0.9) : Console.muted)
-                Spacer(); StatusDot(active: tx.connected)
-            }.frame(height: 18)
+            Button { store.selectControl(ControlSelection(receiver: receiver.serial, transmitter: tx.serial)) } label: {
+                HStack {
+                    Text(String(format: "%02d", tx.index)).font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(tx.connected ? Color(white: 0.9) : Console.muted)
+                    Spacer(); StatusDot(active: tx.connected)
+                }.frame(maxWidth: .infinity, minHeight: 22).contentShape(Rectangle())
+            }.buttonStyle(.plain).disabled(tx.serial.isEmpty).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) を選択").help("⌘クリックで複数選択")
             Button { editing = true } label: {
                 Text(tx.label.isEmpty ? "—" : tx.label).font(.system(size: compact ? 11 : 13, weight: .semibold))
                     .lineLimit(1).frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
@@ -125,6 +129,7 @@ struct CompactChannel: View {
                 .font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(Console.muted)
                 .help(destinations.isEmpty ? "共通入力への割り当てなし" : "共通入力: " + destinations.map { "CH \($0)" }.joined(separator: ", "))
         }.font(.system(size: 9, design: .monospaced)).padding(.horizontal, compact ? 8 : 12).padding(.vertical, 10).frame(maxWidth: .infinity).background(Console.strip)
+            .overlay(alignment: .top) { if !tx.serial.isEmpty && store.controlSelection.contains(ControlSelection(receiver: receiver.serial, transmitter: tx.serial)) { Rectangle().fill(Console.cyan).frame(height: 2) } }
     }
 }
 

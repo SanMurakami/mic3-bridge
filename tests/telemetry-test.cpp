@@ -18,9 +18,10 @@ int main(){
   std::vector<uint8_t> payload={3,32,0,2,4,0,0,0,26};payload.insert(payload.end(),data.begin(),data.end());auto packet=frame(payload);
   dji::TelemetryParser state;state.frame(packet.data(),packet.size());auto tx=state.state.transmitters.at(3);
   assert(tx.eq==(eq<3?int(eq):-1)&&tx.lowCut==int(cut)&&tx.recording);
+  assert(state.txRevisions.at(3)==1 && state.rxRevision==0);
   assert(state.clockRevision==0); // TX-only通知でRX時計の取得時刻を更新しない
  }
- {dji::TelemetryParser state;state.frame(f.data(),f.size());assert(state.clockRevision==1);auto snapshot=state.state;
+ {dji::TelemetryParser state;state.frame(f.data(),f.size());assert(state.clockRevision==1 && state.rxRevision==1 && state.txRevisions.at(2)==1);auto snapshot=state.state;
   dji::TelemetryParser resumed;resumed.seed(snapshot);assert(resumed.state.transmitters.at(2).recording&&resumed.clockRevision==0);
   resumed.frame(f.data(),f.size());assert(resumed.clockRevision==1);
  }

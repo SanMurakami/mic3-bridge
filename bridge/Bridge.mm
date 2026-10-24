@@ -189,6 +189,8 @@ class Manager {
     std::vector<ControlJob> controlJobs;
     static bool affects(const ControlJob& job,const std::string& serial){return job.serial==serial||std::find(job.targets.begin(),job.targets.end(),serial)!=job.targets.end();}
     void updateControlBusy(){for(auto& entry:receivers)entry.second.controlBusy=std::any_of(controlJobs.begin(),controlJobs.end(),[&](auto& job){return affects(job,entry.first);});}
+    static NSDictionary *settingsJSON(const std::map<std::string,int>& values){NSMutableDictionary *result=[NSMutableDictionary dictionary];for(auto& [key,value]:values)result[ns(key)]=@(value);return result;}
+    static std::map<std::string,int> settingsFromJSON(id values){std::map<std::string,int> result;if([values isKindOfClass:NSDictionary.class])for(NSString *key in values)if([key isKindOfClass:NSString.class]&&[values[key] isKindOfClass:NSNumber.class])result[key.UTF8String]=[values[key] intValue];return result;}
     void applyControlResult(Receiver& r,NSArray *arguments,NSDictionary *result,bool processOK){
         bool ok=processOK&&[result isKindOfClass:NSDictionary.class]&&[result[@"success"] boolValue];
         NSString *message=[result isKindOfClass:NSDictionary.class]&&[result[@"message"] isKindOfClass:NSString.class]?result[@"message"]:@"機器の応答を確認できませんでした。";
@@ -196,10 +198,10 @@ class Manager {
         if([result isKindOfClass:NSDictionary.class])recordControlChange(r,arguments,result);
             NSDictionary *status=[result isKindOfClass:NSDictionary.class]?result[@"status"]:nil;
             if([status isKindOfClass:NSDictionary.class]&&[status[@"known"] boolValue]){
-                dji::Telemetry state;state.known=true;state.connectedMask=[status[@"connected_mask"] intValue];state.observedHostSeconds=[status[@"observed_host_seconds"] doubleValue];state.lossless=[status[@"lossless"] intValue];state.gain=[status[@"gain_db"] intValue];
+                dji::Telemetry state;state.settings=settingsFromJSON(status[@"settings"]);state.known=true;state.connectedMask=[status[@"connected_mask"] intValue];state.observedHostSeconds=[status[@"observed_host_seconds"] doubleValue];state.lossless=[status[@"lossless"] intValue];state.gain=[status[@"gain_db"] intValue];
                 state.tcEnabled=[status[@"tc_enabled"] boolValue];state.fps=[status[@"fps"] intValue];state.output=[status[@"output"] intValue];state.timecode=[status[@"timecode"] UTF8String]?:"";
                 state.battery=[status[@"battery_code"] intValue];state.charging=[status[@"charging"] boolValue];state.allRecording=[status[@"all_recording"] boolValue];
-                for(NSDictionary *t in status[@"transmitters"]){dji::TransmitterState tx;tx.index=[t[@"index"] unsignedIntValue];if(tx.index<1||tx.index>4)continue;
+                for(NSDictionary *t in status[@"transmitters"]){dji::TransmitterState tx;tx.settings=settingsFromJSON(t[@"settings"]);tx.index=[t[@"index"] unsignedIntValue];if(tx.index<1||tx.index>4)continue;
                     tx.serial=[t[@"serial"] UTF8String]?:"";tx.noise=[t[@"noise_mode"] UTF8String]?:"unknown";tx.eq=t[@"eq"]?[t[@"eq"] intValue]:-1;tx.lowCut=t[@"low_cut"]?[t[@"low_cut"] intValue]:-1;tx.gain=[t[@"gain_db"] intValue];tx.agc=[t[@"agc"] intValue];tx.agcMode=[t[@"agc_mode_raw"] intValue];tx.agcEnabled=[t[@"agc_enabled"] intValue];
                     tx.battery=[t[@"battery_code"] intValue];tx.charging=[t[@"charging"] boolValue];tx.recording=[t[@"recording"] boolValue];tx.total=[t[@"total"] intValue];tx.remaining=[t[@"remaining"] intValue];state.transmitters[tx.index]=tx;}
                 identities.update(r.serial,state);
@@ -240,7 +242,7 @@ class Manager {
         uint64_t registry=RegistryIDs[r.location];
         if(!registry||identities.get(registry).serial!=r.serial)throw std::runtime_error("レシーバーの識別情報を更新してください。");
         arguments=[arguments arrayByAddingObjectsFromArray:@[@"--registry-id",[NSString stringWithFormat:@"%llu",(unsigned long long)registry]]];
-        NSString *op=arguments.firstObject;NSUInteger keyLength=([op isEqual:@"--gain"]||[op isEqual:@"--agc"]||[op isEqual:@"--eq"]||[op isEqual:@"--low-cut"]||[op isEqual:@"--record-tx"])?4:[op isEqual:@"--set"]?3:([op isEqual:@"--lossless"]||[op isEqual:@"--tc"])?2:0;
+        NSString *op=arguments.firstObject;NSUInteger keyLength=[op isEqual:@"--setting"]?5:([op isEqual:@"--gain"]||[op isEqual:@"--agc"]||[op isEqual:@"--eq"]||[op isEqual:@"--low-cut"]||[op isEqual:@"--record-tx"])?4:[op isEqual:@"--set"]?4:([op isEqual:@"--lossless"]||[op isEqual:@"--tc"])?2:0;
         // 実行前の連続した同じ操作は最新値へ集約。他の設定をまたいで順序を変えない。
         if(keyLength&&arguments.count>=keyLength){auto key=[arguments subarrayWithRange:NSMakeRange(0,keyLength)];
             auto index=dji::pendingReplacement(controlJobs,r.serial,[&](auto& job){NSArray *old=job.task.arguments;return old.count>=keyLength&&[[old subarrayWithRange:NSMakeRange(0,keyLength)] isEqual:key];});
@@ -436,6 +438,10 @@ public:
                 if(![target isKindOfClass:NSString.class]||![txSerial isKindOfClass:NSString.class]||![value isKindOfClass:NSString.class])throw std::runtime_error("送信機と設定値が必要です。");
                 NSString *argument=[op isEqual:@"low_cut"]?@"--low-cut":[op isEqual:@"device_record_tx"]?@"--record-tx":[@"--" stringByAppendingString:op];
                 enqueue(r,@[argument,ns(r.serial),target,txSerial,value]);
+            }else if([op isEqual:@"setting"]){
+                NSString *target=command[@"target"],*txSerial=command[@"tx_serial"],*key=command[@"key"],*value=command[@"value"];
+                if(![target isKindOfClass:NSString.class]||![txSerial isKindOfClass:NSString.class]||![key isKindOfClass:NSString.class]||![value isKindOfClass:NSString.class])throw std::runtime_error("機器設定が不正です。");
+                enqueue(r,@[@"--setting",ns(r.serial),target,txSerial,key,value]);
             }else if([op isEqual:@"lossless"]){NSString *value=command[@"enabled"];if(![value isKindOfClass:NSString.class])throw std::runtime_error("ロスレス設定が必要です。");enqueue(r,@[@"--lossless",ns(r.serial),value]);
             }else if([op isEqual:@"audio"]){
                 NSString *quality=command[@"lossless"]?:@"-1",*agc=command[@"agc"]?:@"-1",*noise=command[@"noise"]?:@"keep",*eq=command[@"eq"]?:@"-1",*lowCut=command[@"low_cut"]?:@"-1";
@@ -449,9 +455,9 @@ public:
                 NSString *enabled=command[@"enabled"];if(![enabled isKindOfClass:[NSString class]]||(![enabled isEqual:@"0"]&&![enabled isEqual:@"1"]))throw std::runtime_error("録音操作が不正です。");
                 enqueue(r,@[@"--record",ns(r.serial),enabled],[enabled isEqual:@"0"]);
             }else if([op isEqual:@"noise"]){
-                NSString *mode=command[@"mode"];unsigned target=[command[@"target"] intValue];auto states=identities.controls(r.serial);
-                if(![mode isKindOfClass:[NSString class]]||(![mode isEqual:@"none"]&&![mode isEqual:@"basic"]&&![mode isEqual:@"strong"])||!states.count(target))throw std::runtime_error("送信機の状態を更新してから操作してください。");
-                enqueue(r,@[@"--set",ns(r.serial),[NSString stringWithFormat:@"%u",target],mode]);
+                NSString *mode=command[@"mode"],*txSerial=command[@"tx_serial"];unsigned target=[command[@"target"] intValue];auto states=identities.status(r.serial).transmitters;
+                if(![mode isKindOfClass:[NSString class]]||(![mode isEqual:@"none"]&&![mode isEqual:@"basic"]&&![mode isEqual:@"strong"])||!states.count(target)||![txSerial isKindOfClass:NSString.class]||states.at(target).serial!=(txSerial.UTF8String?:""))throw std::runtime_error("送信機の状態を更新してから操作してください。");
+                enqueue(r,@[@"--set",ns(r.serial),[NSString stringWithFormat:@"%u",target],txSerial,mode]);
             }else if([op isEqual:@"delete"]){
                 if(r.session||r.location)throw std::runtime_error("レシーバーを USB から抜いてから登録を削除してください。");
                 if(r.inUse)throw std::runtime_error("他のソフトがこの入力を使用中です。USB を抜いても入力と4chの無音を維持します。使用を終了してから削除してください。");
@@ -483,11 +489,11 @@ public:
             auto state=r.location?identities.status(serial):dji::Telemetry{};rememberTransmitters(r,state);
             NSMutableArray *transmitters=[NSMutableArray array];for(unsigned index=1;index<=4;index++){
                 auto it=state.transmitters.find(index);bool live=it!=state.transmitters.end();const dji::TransmitterState *tx=live?&it->second:nullptr;auto key=labelKey(r,index,tx);NSString *label=labels[ns(key)]?:@"";
-                [transmitters addObject:@{@"index":@(index),@"serial":tx?ns(tx->serial):@"",@"label_key":ns(key),@"label":label,@"connected":@(live),@"eq":@(tx?tx->eq:-1),@"low_cut":@(tx?tx->lowCut:-1),@"gain_db":@(tx?tx->gain:-1000),@"agc":@(tx?tx->agc:-1),@"noise_mode":tx?ns(tx->noise):@"unknown",@"battery_code":@(tx?tx->battery:-1),@"charging":@(tx&&tx->charging),@"device_recording":@(tx&&tx->recording),@"storage_total":@(tx?tx->total:-1),@"storage_remaining":@(tx?tx->remaining:-1)}];
+                [transmitters addObject:@{@"settings":settingsJSON(tx?tx->settings:std::map<std::string,int>{}),@"index":@(index),@"serial":tx?ns(tx->serial):@"",@"label_key":ns(key),@"label":label,@"connected":@(live),@"eq":@(tx?tx->eq:-1),@"low_cut":@(tx?tx->lowCut:-1),@"gain_db":@(tx?tx->gain:-1000),@"agc":@(tx?tx->agc:-1),@"noise_mode":tx?ns(tx->noise):@"unknown",@"battery_code":@(tx?tx->battery:-1),@"charging":@(tx&&tx->charging),@"device_recording":@(tx&&tx->recording),@"storage_total":@(tx?tx->total:-1),@"storage_remaining":@(tx?tx->remaining:-1)}];
             }
             NSMutableArray *wave=[NSMutableArray array];if(s)for(auto& bin:s->waveform.take()){NSMutableArray *low=[NSMutableArray array],*high=[NSMutableArray array];for(unsigned c=0;c<4;c++){[low addObject:@(bin.low[c])];[high addObject:@(bin.high[c])];}[wave addObject:@{@"time":@(bin.time),@"duration":@(bin.duration),@"low":low,@"high":high}];}
             NSDictionary *tc=@{@"observed_host_seconds":@(state.observedHostSeconds),@"known":@(state.known),@"enabled":@(state.tcEnabled),@"fps":@(state.fps),@"output":@(state.output),@"timecode":ns(state.timecode)};
-            [rows addObject:@{@"serial":ns(serial),@"name":ns(r.name),@"firmware":ns(r.firmware),@"status":ns(r.status),@"connected":@(s!=nullptr),@"can_delete":@(!s&&!r.location&&!r.inUse),
+            [rows addObject:@{@"settings":settingsJSON(state.settings),@"serial":ns(serial),@"name":ns(r.name),@"firmware":ns(r.firmware),@"status":ns(r.status),@"connected":@(s!=nullptr),@"can_delete":@(!s&&!r.location&&!r.inUse),
                 @"source_id":@(s?s->source:0),@"virtual_id":@(s?s->target:0),@"virtual_uid":ns(r.uid()),@"usb_location":[NSString stringWithFormat:@"0x%08x",r.location],
                 @"gain_db":@(state.gain),@"lossless":@(state.lossless),@"waveform":wave,@"transmitters":transmitters,@"tc":tc,@"control_message":ns(r.controlMessage),@"battery_code":@(state.battery),@"charging":@(state.charging),@"control_busy":@(r.controlBusy),@"meters":peaks,@"recording":@(s&&s->recorder),@"recorded_seconds":@(frames/rate),@"recording_path":ns(path),@"error":ns(error),@"dropped":@(s?s->dropped.load():0)}];
         }
