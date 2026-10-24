@@ -116,7 +116,7 @@ import AVFoundation
         var command = values; command["serial"] = receiver.serial; send(op, values: command)
     }
     func send(_ op: String, values: [String: String] = [:]) {
-        let guarded: Set<String> = ["gain", "agc", "lossless", "audio_all", "noise", "tc", "tc_all", "route", "bus_channels", "delete", "rename"]
+        let guarded: Set<String> = ["gain", "agc", "lossless", "audio_all", "noise", "tc", "tc_all", "tc_sync_all", "route", "bus_channels", "delete", "rename"]
         guard !settingsLocked || !guarded.contains(op) else { return }
         var command = values; command["op"] = op
         do {
@@ -296,7 +296,7 @@ struct ReceiverCard: View {
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 4) {
-                    Text(!receiver.tc.known ? "—:—:—:—" : receiver.tc.enabled ? receiver.tc.timecode : "TC OFF")
+                    LiveTimecode(receiver: receiver, feed: store.feed(receiver.serial))
                         .font(.system(size: 18, weight: .medium, design: .monospaced)).foregroundStyle(receiver.tc.known ? Color(white: 0.82) : Console.muted)
                     Text(receiver.tc.known ? "\(Console.fpsName(receiver.tc.fps)) fps · \(Console.outputName(receiver.tc.output))" : "TC 状態未取得")
                         .font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted)
@@ -532,6 +532,9 @@ struct MainView: View {
             Toggle(tcEnabled ? "TC ON" : "TC OFF", isOn: $tcEnabled).toggleStyle(.switch).tint(Console.cyan).foregroundStyle(Console.cyan)
             Picker("FPS", selection: $fps) { ForEach(0..<Console.fps.count, id: \.self) { Text(Console.fps[$0]).tag($0) } }
             Picker("出力", selection: $outputMode) { ForEach(0..<Console.outputs.count, id: \.self) { Text(["L-IN · TC入力", "L-OUT · USB全ch TC", "A-OUT · CH1 TC", "N/A · 音声4ch"][$0]).tag($0) } }
+            Button { showingTC = false; store.bulk("tc_sync_all", values: ["fps": String(fps)]) } label: {
+                Label("Mac時刻に一括同期", systemImage: "arrow.triangle.2.circlepath")
+            }.buttonStyle(ConsoleButton(active: true)).disabled(store.targets.isEmpty || store.targetsBusy || store.settingsLocked)
             HStack { Spacer(); Button("選択RXへ適用") {
                 showingTC = false
                 if tcEnabled && outputMode == 1 { confirmTCOnly = true } else { applyTC() }

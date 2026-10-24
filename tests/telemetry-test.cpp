@@ -49,7 +49,7 @@ int main(){
   payload.insert(payload.end(),{3,0,0,0,0,uint8_t(rxValue.size())});payload.insert(payload.end(),rxValue.begin(),rxValue.end());payload[1]=payload.size()-3;
   auto packet=frame(payload);dji::TelemetryParser parser;parser.frame(packet.data(),packet.size());
   assert(dji::completeTelemetry(parser.state)&&parser.state.connectedMask==4&&parser.state.transmitters.size()==1);
-  auto t=parser.state.transmitters.at(3);assert(t.serial=="TEST0000000007"&&t.recording&&t.gain==0&&t.agc==1&&t.noise=="none");assert(!parser.state.transmitters.count(4));
+  auto t=parser.state.transmitters.at(3);assert(t.serial=="TEST0000000007"&&t.recording&&t.gain==0&&t.agc==1&&t.noise=="none");assert(!parser.state.transmitters.count(4));assert(t.timecode=="03:23:41:07"&&parser.state.timecode==t.timecode);assert(parser.state.clock[1]==26&&parser.state.clock[2]==10&&parser.state.clock[3]==25);
  }
  // 途切れた record、破損した CRC を事実として反映しない。
  p.back()=0;p.pop_back();p[1]--;auto truncated=frame(p);dji::TelemetryParser t;t.frame(truncated.data(),truncated.size());assert(!t.state.known);

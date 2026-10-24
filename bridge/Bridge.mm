@@ -185,18 +185,15 @@ class Manager {
     NSString *labelsPath;NSMutableDictionary *labels=[NSMutableDictionary dictionary];
     bool busInUse=false;
     std::set<AudioObjectID> runningListeners;
-    struct ControlJob {NSTask *task;NSPipe *output;std::string serial;bool started=false;};
+    struct ControlJob {NSTask *task;NSPipe *output;std::string serial;bool started=false;std::vector<std::string> targets{};NSMutableData *captured=[NSMutableData data];};
     std::vector<ControlJob> controlJobs;
-    void pollControls(){
-        if(controlJobs.empty())return;auto& job=controlJobs.front();auto r=receivers.find(job.serial);
-        if(!job.started){NSError *error=nil;if([job.task launchAndReturnError:&error]){job.started=true;return;}
-            if(r!=receivers.end())r->second.error=error.localizedDescription.UTF8String;controlJobs.erase(controlJobs.begin());if(r!=receivers.end())r->second.controlBusy=std::any_of(controlJobs.begin(),controlJobs.end(),[&](auto& pending){return pending.serial==r->first;});return;}
-        if(job.task.running)return;
-        NSData *data=[job.output.fileHandleForReading readDataToEndOfFile];id result=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        if(r!=receivers.end()){r->second.controlBusy=false;bool ok=job.task.terminationStatus==0&&[result isKindOfClass:[NSDictionary class]]&&[result[@"success"] boolValue];
-            NSString *message=[result isKindOfClass:[NSDictionary class]]&&[result[@"message"] isKindOfClass:[NSString class]]?result[@"message"]:@"機器の応答を確認できませんでした。";
-            r->second.controlMessage=message.UTF8String;if(!ok)r->second.error=message.UTF8String;
-            if([result isKindOfClass:NSDictionary.class])recordControlChange(r->second,job.task.arguments,result);
+    static bool affects(const ControlJob& job,const std::string& serial){return job.serial==serial||std::find(job.targets.begin(),job.targets.end(),serial)!=job.targets.end();}
+    void updateControlBusy(){for(auto& entry:receivers)entry.second.controlBusy=std::any_of(controlJobs.begin(),controlJobs.end(),[&](auto& job){return affects(job,entry.first);});}
+    void applyControlResult(Receiver& r,NSArray *arguments,NSDictionary *result,bool processOK){
+        bool ok=processOK&&[result isKindOfClass:NSDictionary.class]&&[result[@"success"] boolValue];
+        NSString *message=[result isKindOfClass:NSDictionary.class]&&[result[@"message"] isKindOfClass:NSString.class]?result[@"message"]:@"機器の応答を確認できませんでした。";
+        r.controlMessage=message.UTF8String;if(!ok)r.error=message.UTF8String;
+        if([result isKindOfClass:NSDictionary.class])recordControlChange(r,arguments,result);
             NSDictionary *status=[result isKindOfClass:NSDictionary.class]?result[@"status"]:nil;
             if([status isKindOfClass:NSDictionary.class]&&[status[@"known"] boolValue]){
                 dji::Telemetry state;state.known=true;state.connectedMask=[status[@"connected_mask"] intValue];state.observedHostSeconds=[status[@"observed_host_seconds"] doubleValue];state.lossless=[status[@"lossless"] intValue];state.gain=[status[@"gain_db"] intValue];
@@ -205,10 +202,25 @@ class Manager {
                 for(NSDictionary *t in status[@"transmitters"]){dji::TransmitterState tx;tx.index=[t[@"index"] unsignedIntValue];if(tx.index<1||tx.index>4)continue;
                     tx.serial=[t[@"serial"] UTF8String]?:"";tx.noise=[t[@"noise_mode"] UTF8String]?:"unknown";tx.gain=[t[@"gain_db"] intValue];tx.agc=[t[@"agc"] intValue];tx.agcMode=[t[@"agc_mode_raw"] intValue];tx.agcEnabled=[t[@"agc_enabled"] intValue];
                     tx.battery=[t[@"battery_code"] intValue];tx.charging=[t[@"charging"] boolValue];tx.recording=[t[@"recording"] boolValue];tx.total=[t[@"total"] intValue];tx.remaining=[t[@"remaining"] intValue];state.transmitters[tx.index]=tx;}
-                identities.update(job.serial,state);
-            }else identities.refresh(job.serial);}
-        controlJobs.erase(controlJobs.begin());
-        if(r!=receivers.end())r->second.controlBusy=std::any_of(controlJobs.begin(),controlJobs.end(),[&](auto& pending){return pending.serial==r->first;});
+                identities.update(r.serial,state);
+            }else identities.refresh(r.serial);
+    }
+    void pollControls(){
+        if(controlJobs.empty())return;auto& job=controlJobs.front();
+        auto targets=job.targets.empty()?std::vector<std::string>{job.serial}:job.targets;
+        if(!job.started){NSError *error=nil;if([job.task launchAndReturnError:&error]){job.started=true;int fd=job.output.fileHandleForReading.fileDescriptor;fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_NONBLOCK);return;}
+            for(auto& serial:targets){auto r=receivers.find(serial);if(r!=receivers.end())r->second.error=error.localizedDescription.UTF8String;}
+            controlJobs.erase(controlJobs.begin());updateControlBusy();return;}
+        auto drainOutput=[&]{uint8_t bytes[8192];ssize_t count;while((count=read(job.output.fileHandleForReading.fileDescriptor,bytes,sizeof(bytes)))>0)[job.captured appendBytes:bytes length:size_t(count)];};drainOutput();
+        if(job.task.running)return;drainOutput();
+        NSData *data=job.captured;id result=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        for(auto& serial:targets){auto r=receivers.find(serial);if(r==receivers.end())continue;
+            NSDictionary *value=job.targets.empty()?result:([result isKindOfClass:NSDictionary.class]?result[@"receivers"][ns(serial)]:nil);
+            if(![value isKindOfClass:NSDictionary.class])value=@{@"success":@NO,@"message":([result isKindOfClass:NSDictionary.class]?result[@"message"]:nil)?:@"TC同期の応答を確認できませんでした。"};
+            // 結果は対象RXごとに保持する。
+            applyControlResult(r->second,job.task.arguments,value,job.targets.empty()?job.task.terminationStatus==0:true);
+        }
+        controlJobs.erase(controlJobs.begin());updateControlBusy();
     }
     void recordControlChange(Receiver& r,NSArray *arguments,NSDictionary *result){
         if(!r.session||!r.session->recorder)return;
@@ -220,7 +232,7 @@ class Manager {
         NSMutableArray *events=raw[@"control_events"];
         if(![events isKindOfClass:NSMutableArray.class]){events=[NSMutableArray array];raw[@"control_events"]=events;}
         [events addObject:@{@"host_seconds":@(mach_absolute_time()/hostFrequency()),@"recorded_frame":@(session.recordedFrames),
-            @"command":arguments,@"success":result[@"success"]?:@NO,@"message":result[@"message"]?:@"",@"status":result[@"status"]?:@{}}];
+            @"command":arguments,@"success":result[@"success"]?:@NO,@"message":result[@"message"]?:@"",@"status":result[@"status"]?:@{},@"sync":result[@"sync"]?:@{}}];
         NSData *data=[NSJSONSerialization dataWithJSONObject:raw options:NSJSONWritingPrettyPrinted error:&error];
         if(!data||![data writeToFile:path options:NSDataWritingAtomic error:&error])r.error="録音は継続中ですが、設定変更履歴を保存できませんでした。";
     }
@@ -232,14 +244,15 @@ class Manager {
         // 実行前の連続した同じ操作は最新値へ集約。他の設定をまたいで順序を変えない。
         if(keyLength&&arguments.count>=keyLength){auto key=[arguments subarrayWithRange:NSMakeRange(0,keyLength)];
             auto index=dji::pendingReplacement(controlJobs,r.serial,[&](auto& job){NSArray *old=job.task.arguments;return old.count>=keyLength&&[[old subarrayWithRange:NSMakeRange(0,keyLength)] isEqual:key];});
-            if(index<controlJobs.size()){controlJobs[index].task.arguments=arguments;return;}}
-        if(!priorityStop&&(controlJobs.size()>=64||std::count_if(controlJobs.begin(),controlJobs.end(),[&](auto& job){return job.serial==r.serial;})>=16))throw std::runtime_error("機器への操作が混み合っています。");
+            if(index<controlJobs.size()&&std::none_of(controlJobs.begin()+index+1,controlJobs.end(),[&](auto& job){return affects(job,r.serial); })){controlJobs[index].task.arguments=arguments;return;}}
+        if(!priorityStop&&(controlJobs.size()>=64||std::count_if(controlJobs.begin(),controlJobs.end(),[&](auto& job){return affects(job,r.serial);})>=16))throw std::runtime_error("機器への操作が混み合っています。");
         NSTask *task=[NSTask new];NSPipe *output=[NSPipe pipe];task.standardOutput=output;task.standardError=[NSFileHandle fileHandleWithNullDevice];
         task.executableURL=[NSURL fileURLWithPath:[[[NSBundle mainBundle].executablePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"dji-mic-control"]];task.arguments=arguments;
         r.controlBusy=true;r.controlMessage=priorityStop?"停止待ち":"適用待ち";
-        if(priorityStop){for(auto it=controlJobs.begin();it!=controlJobs.end();)if(it->serial==r.serial&&!it->started)it=controlJobs.erase(it);else++it;
+        if(priorityStop){for(auto it=controlJobs.begin();it!=controlJobs.end();)if(it->serial==r.serial&&it->targets.empty()&&!it->started)it=controlJobs.erase(it);else++it;
             auto position=controlJobs.begin();if(position!=controlJobs.end()&&position->started)++position;controlJobs.insert(position,{task,output,r.serial,false});}
         else controlJobs.push_back({task,output,r.serial,false});
+        updateControlBusy();
     }
     std::string labelKey(const Receiver& r,unsigned index,const dji::TransmitterState *tx=nullptr){auto slot=r.serial+":TX"+std::to_string(index);NSString *mapping=labels[ns("@slot:"+slot)];
         if(tx&&!tx->serial.empty())return tx->serial;
@@ -367,6 +380,21 @@ public:
         if(![command isKindOfClass:[NSDictionary class]])return;
         if([command[@"op"] isEqual:@"bus_channels"]||[command[@"op"] isEqual:@"route"]){routingCommand(command);return;}
         NSString *bulkOp=command[@"op"];
+        if([bulkOp isEqual:@"tc_sync_all"]){commandError.clear();try{
+            NSString *fps=command[@"fps"],*selection=command[@"serials"];
+            if(![fps isKindOfClass:NSString.class]||fps.length!=1||[fps characterAtIndex:0]<'0'||[fps characterAtIndex:0]>'7'||![selection isKindOfClass:NSString.class])throw std::runtime_error("TC同期の対象またはFPSが不正です。");
+            NSArray *selected=[selection componentsSeparatedByString:@","];NSMutableArray *args=[NSMutableArray arrayWithObjects:@"--sync-all",fps,nil];std::vector<std::string> targets;
+            for(NSString *serial in selected){auto it=receivers.find(serial.UTF8String);if(it==receivers.end()||!it->second.session)throw std::runtime_error("選択RXが未接続です。");auto& r=it->second;auto id=RegistryIDs[r.location];
+                if(!id||identities.get(id).serial!=r.serial)throw std::runtime_error("RXの識別情報を更新してください。");
+                if(std::find(targets.begin(),targets.end(),r.serial)!=targets.end())throw std::runtime_error("TC同期の対象が重複しています。");
+                targets.push_back(r.serial);[args addObjectsFromArray:@[serial,[NSString stringWithFormat:@"%llu",(unsigned long long)id]]];}
+            if(targets.empty()||controlJobs.size()>=64)throw std::runtime_error("TC同期の対象がないか操作が混み合っています。");
+            NSTask *task=[NSTask new];NSPipe *pipe=[NSPipe pipe];task.standardOutput=pipe;task.standardError=NSFileHandle.fileHandleWithNullDevice;
+            task.executableURL=[NSURL fileURLWithPath:[[[NSBundle mainBundle].executablePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"dji-mic-control"]];task.arguments=args;
+            for(auto& serial:targets){receivers.at(serial).error.clear();receivers.at(serial).controlMessage.clear();}
+            controlJobs.push_back({task,pipe,targets.front(),false,targets});updateControlBusy();
+        }catch(const std::exception& e){commandError=e.what();}return;}
+
         if([@[@"record_all",@"stop_all",@"device_record_all",@"device_stop_all",@"tc_all",@"refresh_all",@"audio_all"] containsObject:bulkOp]){
             NSString *single=[bulkOp isEqual:@"audio_all"]?@"audio":[bulkOp isEqual:@"record_all"]?@"record":[bulkOp isEqual:@"stop_all"]?@"stop":[bulkOp isEqual:@"tc_all"]?@"tc":[bulkOp isEqual:@"refresh_all"]?@"refresh_controls":@"device_record";
             NSString *selection=command[@"serials"];NSArray *selected=[selection isKindOfClass:[NSString class]]?[selection componentsSeparatedByString:@","]:nil;

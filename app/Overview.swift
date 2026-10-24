@@ -26,7 +26,7 @@ struct ReceiverOverview: View {
             HStack {
                 Text(String(receiver.serial.suffix(6)))
                 Spacer()
-                Text(receiver.tc.known && receiver.tc.enabled ? receiver.tc.timecode : "—:—:—:—")
+                LiveTimecode(receiver: receiver, feed: store.feed(receiver.serial))
                 Text(Console.fpsName(receiver.tc.fps))
             }.font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted).padding(10)
             if !receiver.error.isEmpty { Text(receiver.error).font(.caption).foregroundStyle(.orange).padding(8) }

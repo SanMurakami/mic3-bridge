@@ -17,10 +17,14 @@ static uint64_t parentID(io_service_t service){
     IOObjectRelease(current);return id;
 }
 static NSDictionary *jsonStatus(const dji::Telemetry& s){
-    NSMutableArray *tx=[NSMutableArray array];for(auto& [index,t]:s.transmitters)[tx addObject:@{@"index":@(index),@"serial":@(t.serial.c_str()),@"noise_mode":@(t.noise.c_str()),@"gain_db":@(t.gain),@"agc":@(t.agc),@"agc_enabled":@(t.agcEnabled),@"agc_mode_raw":@(t.agcMode),@"battery_code":@(t.battery),@"charging":@(t.charging),@"recording":@(t.recording),@"total":@(t.total),@"remaining":@(t.remaining)}];
+    NSMutableArray *tx=[NSMutableArray array];for(auto& [index,t]:s.transmitters)[tx addObject:@{@"index":@(index),@"serial":@(t.serial.c_str()),@"noise_mode":@(t.noise.c_str()),@"timecode":@(t.timecode.c_str()),@"gain_db":@(t.gain),@"agc":@(t.agc),@"agc_enabled":@(t.agcEnabled),@"agc_mode_raw":@(t.agcMode),@"battery_code":@(t.battery),@"charging":@(t.charging),@"recording":@(t.recording),@"total":@(t.total),@"remaining":@(t.remaining)}];
     return @{@"known":@(s.known),@"connected_mask":@(s.connectedMask),@"observed_host_seconds":@(s.observedHostSeconds),@"all_recording":@(s.allRecording),@"charging":@(s.charging),@"lossless":@(s.lossless),@"gain_db":@(s.gain),@"tc_enabled":@(s.tcEnabled),@"fps":@(s.fps),@"output":@(s.output),@"timecode":@(s.timecode.c_str()),@"battery_code":@(s.battery),@"transmitters":tx};
 }
+#include "TimecodeSyncControl.hpp"
 int main(int argc,const char *argv[]){@autoreleasepool{
+    if(argc>1&&std::string(argv[1])=="--sync-all"){
+        NSDictionary *result=syncTimecode(argc,argv);NSData *data=[NSJSONSerialization dataWithJSONObject:result options:0 error:nil];fwrite(data.bytes,1,data.length,stdout);putchar('\n');return [result[@"success"] boolValue]?0:2;
+    }
     bool success=false;std::string message="指定したレシーバーの状態を取得できませんでした。";dji::Telemetry finalState;NSMutableArray *events=[NSMutableArray array],*probes=[NSMutableArray array];
     try {
         uint64_t registryHint=0;

@@ -88,3 +88,16 @@ private struct MeterGaps: View, Equatable {
         }
     }
 }
+
+// RXのTCを共通host時計へ投影する。
+struct LiveTimecode: View {
+    let receiver: Receiver
+    @ObservedObject var feed: ReceiverFeed
+    private var value: String {
+        guard receiver.connected, receiver.tc.known else { return "—:—:—:—" }
+        guard receiver.tc.enabled else { return "TC OFF" }
+        guard let host = receiver.tc.observed_host_seconds, host > 0 else { return "—:—:—:—" }
+        return ClockAnchor(host: host, tc: receiver.tc).text(at: feed.frame.now) ?? "—:—:—:—"
+    }
+    var body: some View { Text(value).monospacedDigit().accessibilityLabel("TC \(receiver.serial.suffix(6))") }
+}

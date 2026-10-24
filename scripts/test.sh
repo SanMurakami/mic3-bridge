@@ -28,3 +28,6 @@ swiftc -O -warnings-as-errors "$repo_dir/app/TimelineData.swift" "$repo_dir/app/
 clang++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
     "$repo_dir/tests/control-queue-test.cpp" -o "$repo_dir/.build/control-queue-test"
 "$repo_dir/.build/control-queue-test"
+clang++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
+    "$repo_dir/tests/timecode-sync-test.cpp" -o "$repo_dir/.build/timecode-sync-test"
+"$repo_dir/.build/timecode-sync-test"
