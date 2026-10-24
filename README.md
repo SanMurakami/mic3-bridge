@@ -1,6 +1,7 @@
 # DJI Mic 3 Bridge
 
-複数のDJI Mic 3レシーバーをmacOSで使うためのアプリとCore Audioドライバーです。
+複数のDJI Mic 3レシーバーをmacOSで使うためのアプリとCore Audioドライバーです。\
+複数のレシーバーを本体シリアルで識別し、各レシーバーの音声を仮想入力へ送ります。
 
 ※このプロジェクトの対応・検証対象はDJI Mic 3です。\
 開発者が初代DJI Mic・DJI Mic 2・Mic Mini系を所有していないため、それらの対応・検証は行っていません。
