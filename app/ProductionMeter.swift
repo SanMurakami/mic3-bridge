@@ -35,18 +35,19 @@ struct ProductionMeter: View {
             }.buttonStyle(ConsoleCompactButton(height: 16, padding: 0))
             HStack(spacing: 4) {
                 MeterScale().equatable().frame(width: 23)
-                GeometryReader { p in
-                    let h = p.size.height
-                    ZStack(alignment: .bottom) {
-                        Rectangle().fill(Color.black.opacity(0.75))
-                        LinearGradient(stops: [.init(color: red, location: 0), .init(color: red, location: 0.1), .init(color: yellow, location: 0.1), .init(color: yellow, location: 0.3), .init(color: green, location: 0.3), .init(color: green, location: 1)], startPoint: .top, endPoint: .bottom)
-                            .mask(alignment: .bottom) { Rectangle().frame(height: h * (meter.level + 60) / 60).animation(.linear(duration: 0.032), value: meter.level) }
-                        MeterGaps().equatable()
-                        Rectangle().fill(Color.white.opacity(0.8)).frame(height: 1.5)
-                            .offset(y: -h * (meter.peak + 60) / 60).animation(.linear(duration: 0.032), value: meter.peak)
-                    }.clipShape(RoundedRectangle(cornerRadius: 1))
-                        .overlay(Rectangle().stroke(Color.white.opacity(0.08)))
-                }.frame(width: 18)
+                Canvas { context, size in
+                    context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(white: 0.025)))
+                    for i in 0..<40 {
+                        let db = -60 + Double(i + 1) * 1.5
+                        let rect = CGRect(x: 1, y: size.height * Double(39-i)/40, width: size.width-2, height: max(1, size.height/40-1))
+                        let color = db > -6 ? red : db > -18 ? yellow : green
+                        context.fill(Path(rect), with: .color(color.opacity(meter.level >= db ? 1 : 0.065)))
+                    }
+                    if meter.peak > -60 {
+                        let y = max(0, size.height * -meter.peak/60)
+                        context.fill(Path(CGRect(x: 0, y: y, width: size.width, height: 1.5)), with: .color(.white.opacity(0.85)))
+                    }
+                }.frame(width: 18).overlay(Rectangle().stroke(Color.white.opacity(0.12)))
             }.frame(height: height)
             if numeric {
                 Text(meter.level > -60 ? String(format: "%.1f", meter.level) : "−∞")
@@ -68,30 +69,18 @@ private struct MeterScale: View, Equatable {
         }
     }
 }
-private struct MeterGaps: View, Equatable {
-    var body: some View {
-        Canvas(rendersAsynchronously: true) { context, size in
-            var separators = Path()
-            for i in 1..<40 {
-                let y = size.height * Double(i) / 40
-                separators.move(to: CGPoint(x: 0, y: y)); separators.addLine(to: CGPoint(x: size.width, y: y))
-            }
-            context.stroke(separators, with: .color(Console.strip), lineWidth: 1)
-        }
-    }
-}
-
 // RXのTCを共通host時計へ投影する。
 struct LiveTimecode: View {
     let receiver: Receiver
     @ObservedObject var feed: ReceiverFeed
+    var digitHeight: CGFloat = 13
     private var value: String {
         guard receiver.connected, receiver.tc.known else { return "—:—:—:—" }
         guard receiver.tc.enabled else { return "TC OFF" }
         guard let host = receiver.tc.observed_host_seconds, host > 0 else { return "—:—:—:—" }
         return ClockAnchor(host: host, tc: receiver.tc).text(at: feed.frame.now) ?? "—:—:—:—"
     }
-    var body: some View { Text(value).monospacedDigit().accessibilityLabel("TC \(receiver.serial.suffix(6))").accessibilityValue(value) }
+    var body: some View { SegmentDisplay(text: value, height: digitHeight).accessibilityLabel("TC \(receiver.serial.suffix(6))").accessibilityValue(value) }
 }
 
 struct TransportTimecode: View {
@@ -99,7 +88,7 @@ struct TransportTimecode: View {
     @ObservedObject var feed: ReceiverFeed
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
-            LiveTimecode(receiver: receiver, feed: feed)
+            LiveTimecode(receiver: receiver, feed: feed, digitHeight: 24)
                 .font(.system(size: 21, weight: .medium, design: .monospaced)).foregroundStyle(Color(white: 0.9))
             VStack(alignment: .leading, spacing: 3) {
                 Text(String(receiver.serial.suffix(6)))

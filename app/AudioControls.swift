@@ -9,6 +9,10 @@ struct NativeGainFader: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSSlider {
         let slider = NSSlider(value: Double(value), minValue: -12, maxValue: 12, target: context.coordinator, action: #selector(Coordinator.changed(_:)))
+        slider.cell = ConsoleFaderCell()
+        slider.minValue = -12; slider.maxValue = 12; slider.doubleValue = Double(value)
+        slider.target = context.coordinator; slider.action = #selector(Coordinator.changed(_:))
+        slider.focusRingType = .none
         slider.isVertical = true
         slider.isContinuous = false
         slider.numberOfTickMarks = 5; slider.allowsTickMarkValuesOnly = false
@@ -116,5 +120,25 @@ struct SessionRecordStatus: View {
                 .foregroundStyle(active.isEmpty ? Console.muted : .red)
             if !active.isEmpty { Text("\(active.count) RX").font(.system(size: 9, design: .monospaced)).foregroundStyle(Console.muted) }
         }
+    }
+}
+
+// tracking/keyboard/accessibility は NSSlider に任せ、描画だけをコンソールに合わせる。
+final class ConsoleFaderCell: NSSliderCell {
+    override func drawBar(inside rect: NSRect, flipped: Bool) {
+        let rail = NSRect(x: rect.midX - 2, y: rect.minY, width: 4, height: rect.height)
+        NSColor(white: 0.035, alpha: 1).setFill()
+        NSBezierPath(roundedRect: rail, xRadius: 2, yRadius: 2).fill()
+        NSColor(white: 0.26, alpha: 1).setStroke()
+        NSBezierPath(roundedRect: rail, xRadius: 2, yRadius: 2).stroke()
+    }
+    override func drawKnob(_ knobRect: NSRect) {
+        let rect = NSRect(x: knobRect.midX-9, y: knobRect.midY-11, width: 18, height: 22)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2)
+        let alpha: CGFloat = isEnabled ? 1 : 0.35
+        NSGradient(starting: NSColor(white: 0.68, alpha: alpha), ending: NSColor(white: 0.34, alpha: alpha))?.draw(in: path, angle: -90)
+        NSColor(white: 0.08, alpha: 1).setStroke(); path.stroke()
+        NSColor(white: 0.9, alpha: alpha).setFill()
+        NSRect(x: rect.minX+2, y: rect.midY, width: rect.width-4, height: 1).fill()
     }
 }

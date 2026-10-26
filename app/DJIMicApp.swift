@@ -279,6 +279,7 @@ struct MainView: View {
         .frame(minWidth: 1060, minHeight: 730)
         .background(Console.background).foregroundStyle(Color(white: 0.88))
         .tint(Color(white: 0.65)).preferredColorScheme(.dark)
+        .focusEffectDisabled()
         .alert("USB 音声を TC に切り替えます", isPresented: $confirmTCOnly) {
             Button("キャンセル", role: .cancel) { }
             Button("適用", action: applyTC)
