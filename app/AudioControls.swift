@@ -104,19 +104,6 @@ struct ProcessingControls: View {
         }.labelsHidden().controlSize(.mini)
     }
 }
-struct LosslessControl: View {
-    let receiver: Receiver
-    @ObservedObject var store: MicStore
-    var body: some View {
-        Toggle(isOn: Binding(get: { receiver.lossless == 1 }, set: {
-            store.send("lossless", receiver: receiver, values: ["enabled": $0 ? "1" : "0"])
-        })) {
-            Text("LOSSLESS \(receiver.lossless == 1 ? "ON" : receiver.lossless == 0 ? "OFF" : "—")")
-                .font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(Console.cyan)
-        }.toggleStyle(.switch).controlSize(.mini).tint(Console.cyan)
-            .disabled(!receiver.connected || (receiver.lossless ?? -1) < 0 || store.settingsLocked)
-    }
-}
 struct SessionRecordStatus: View {
     @ObservedObject var store: MicStore
     @ObservedObject private var clock: LiveClock

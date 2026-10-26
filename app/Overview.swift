@@ -1,68 +1,6 @@
 import SwiftUI
 import AppKit
 
-struct ReceiverOverview: View {
-    let receiver: Receiver
-    @ObservedObject var store: MicStore
-    var compact = false
-    var showProcessing = true
-    var availableMeterHeight: Double? = nil
-    @State private var editingName = false
-    @State private var name = ""
-    var body: some View {
-        VStack(spacing: 1) {
-            HStack(spacing: 8) {
-                Toggle("一括操作の対象", isOn: Binding(get: { !store.excluded.contains(receiver.serial) }, set: {
-                    if $0 { store.excluded.remove(receiver.serial) } else { store.excluded.insert(receiver.serial) }
-                })).toggleStyle(.checkbox).labelsHidden().disabled(!receiver.connected)
-                StatusDot(active: receiver.connected)
-                Button { store.selectControl(ControlSelection(receiver: receiver.serial)) } label: {
-                    Text(receiver.name).font(.system(size: 11, weight: .semibold)).lineLimit(1).truncationMode(.middle)
-                }.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).buttonStyle(ConsoleSelectionButton(selected: store.controlSelection.contains(ControlSelection(receiver: receiver.serial)))).accessibilityLabel("RX \(receiver.serial.suffix(6)) を選択")
-                Spacer()
-                ProgressView().controlSize(.mini).opacity(receiver.control_busy ? 1 : 0).frame(width: 12)
-                Text(receiver.tc.enabled && receiver.tc.known ? (receiver.tc.output == 1 ? "USB TC×4" : "TC ON") : "TC OFF")
-                    .foregroundStyle(receiver.tc.known && receiver.tc.enabled && receiver.tc.output == 1 ? .orange : Console.cyan)
-                if receiver.recording { Text("● MAC").foregroundStyle(.red) }
-                Menu {
-                    Button("入力名を変更…") { name = receiver.name; editingName = true }.disabled(store.settingsLocked)
-                    Button("機器の状態を更新") { store.send("refresh_controls", receiver: receiver) }.disabled(!receiver.connected)
-                    if !receiver.recording_path.isEmpty {
-                        Button("録音ファイルを表示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: receiver.recording_path)]) }
-                    }
-                    Divider()
-                    Text("RX \(receiver.serial)")
-                    Text("FW \(receiver.firmware)")
-                    Button("登録を削除", role: .destructive) { store.send("delete", receiver: receiver) }.disabled(!receiver.can_delete || store.settingsLocked)
-                } label: { Image(systemName: "ellipsis").frame(width: 24, height: 26).contentShape(Rectangle()) }.menuStyle(.borderlessButton).fixedSize()
-
-            }.font(.system(size: 9, weight: .semibold, design: .monospaced)).padding(.horizontal, 12).frame(height: 44)
-            HStack { LosslessControl(receiver: receiver, store: store); Spacer(); BatteryIndicator(code: receiver.battery_code, connected: receiver.connected, charging: receiver.charging).accessibilityLabel("レシーバー電池") }.padding(.horizontal, 12).padding(.bottom, 10)
-            HStack(spacing: 1) {
-                ForEach(receiver.transmitters) { tx in
-                    CompactChannel(tx: tx, receiver: receiver, store: store, compact: compact, showProcessing: showProcessing, availableMeterHeight: availableMeterHeight)
-                }
-            }.background(Console.line)
-            HStack {
-                Text(String(receiver.serial.suffix(6)))
-                Spacer()
-                LiveTimecode(receiver: receiver, feed: store.feed(receiver.serial))
-                Text(Console.fpsName(receiver.tc.fps))
-            }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Console.muted).padding(.horizontal, 12).frame(height: 34)
-            if !receiver.error.isEmpty { Text(receiver.error).font(.caption).foregroundStyle(.orange).padding(8) }
-        }.background(Console.panel).clipShape(RoundedRectangle(cornerRadius: 3))
-            .overlay(RoundedRectangle(cornerRadius: 3).stroke(store.controlSelection.contains(ControlSelection(receiver: receiver.serial)) ? Console.cyan.opacity(0.7) : receiver.connected ? Console.line : Console.muted.opacity(0.2), lineWidth: 1))
-            .sheet(isPresented: $editingName) {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("仮想入力の名前").font(.headline)
-                    TextField("名前", text: $name).textFieldStyle(.roundedBorder)
-                    HStack { Spacer(); Button("キャンセル") { editingName = false }; Button("保存") {
-                        store.send("rename", receiver: receiver, values: ["name": name]); editingName = false
-                    }.keyboardShortcut(.defaultAction).disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
-                }.padding(24).frame(width: 400)
-            }
-    }
-}
 struct CompactChannel: View {
     let tx: Transmitter
     let receiver: Receiver
@@ -71,6 +9,8 @@ struct CompactChannel: View {
     var compact = false
     var showProcessing = true
     @State private var processing = false
+    @State private var showingGain = false
+    var narrow = false
     var availableMeterHeight: Double? = nil
     private var meterHeight: Double { availableMeterHeight ?? (compact ? 180 : 250) }
     private var destinations: [Int] {
@@ -105,7 +45,22 @@ struct CompactChannel: View {
             }.foregroundStyle(Console.muted)
             HStack(alignment: .top, spacing: 4) {
                 ProductionMeter(feed: store.feed(receiver.serial), channel: tx.index - 1, height: meterHeight)
-                GainControl(tx: tx, receiver: receiver, store: store, height: meterHeight, compact: availableMeterHeight != nil || compact)
+                if !narrow {
+                    GainControl(tx: tx, receiver: receiver, store: store, height: meterHeight, compact: availableMeterHeight != nil || compact)
+                }
+            }
+            if narrow {
+                Button { showingGain = true } label: {
+                    HStack {
+                        Text("GAIN")
+                        Spacer(minLength: 2)
+                        Text(tx.gain_db.flatMap { (-12...12).contains($0) ? String(format: "%+d dB", $0) : nil } ?? "—")
+                    }.font(.system(size: 8, design: .monospaced)).frame(maxWidth: .infinity, minHeight: 18)
+                }.buttonStyle(ConsoleCompactButton(height: 20, padding: 3))
+                    .disabled(!tx.connected || tx.serial.isEmpty)
+                    .popover(isPresented: $showingGain) {
+                        GainControl(tx: tx, receiver: receiver, store: store, height: 190).padding(16)
+                    }
             }
             Toggle(isOn: Binding(get: { tx.settings?["mute"] == 1 }, set: { muted in
                 store.send("setting", receiver: receiver, values: ["target": String(tx.index), "tx_serial": tx.serial, "key": "mute", "value": muted ? "1" : "0"])
