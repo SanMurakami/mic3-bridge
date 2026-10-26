@@ -80,7 +80,7 @@ struct CompactChannel: View {
             } label: {
                 HStack(spacing: 4) {
                     Circle().fill(tx.connected && tx.device_recording ? Color.red : Color(white: 0.28)).frame(width: 6, height: 6)
-                    Text(tx.connected && tx.device_recording ? "● REC / STOP" : "TX REC")
+                    Text(tx.connected && tx.device_recording ? "REC / STOP" : "TX REC")
                 }.frame(maxWidth: .infinity, minHeight: compact ? 24 : 28).contentShape(Rectangle())
             }.buttonStyle(ConsoleCompactButton(active: tx.connected && tx.device_recording, color: .red, padding: 0)).foregroundStyle(tx.connected ? Color.red : Console.muted)
                 .disabled(!tx.connected || tx.serial.isEmpty)
