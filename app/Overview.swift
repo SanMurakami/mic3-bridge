@@ -6,6 +6,7 @@ struct ReceiverOverview: View {
     @ObservedObject var store: MicStore
     var compact = false
     var showProcessing = true
+    var availableMeterHeight: Double? = nil
     @State private var editingName = false
     @State private var name = ""
     var body: some View {
@@ -16,8 +17,8 @@ struct ReceiverOverview: View {
                 })).toggleStyle(.checkbox).labelsHidden().disabled(!receiver.connected)
                 StatusDot(active: receiver.connected)
                 Button { store.selectControl(ControlSelection(receiver: receiver.serial)) } label: {
-                    Text(receiver.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                }.buttonStyle(ConsoleSelectionButton(selected: store.controlSelection.contains(ControlSelection(receiver: receiver.serial)))).accessibilityLabel("RX \(receiver.serial.suffix(6)) を選択")
+                    Text(receiver.name).font(.system(size: 11, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                }.frame(minWidth: 0, maxWidth: .infinity, alignment: .leading).buttonStyle(ConsoleSelectionButton(selected: store.controlSelection.contains(ControlSelection(receiver: receiver.serial)))).accessibilityLabel("RX \(receiver.serial.suffix(6)) を選択")
                 Spacer()
                 ProgressView().controlSize(.mini).opacity(receiver.control_busy ? 1 : 0).frame(width: 12)
                 Text(receiver.tc.enabled && receiver.tc.known ? (receiver.tc.output == 1 ? "USB TC×4" : "TC ON") : "TC OFF")
@@ -39,7 +40,7 @@ struct ReceiverOverview: View {
             HStack { LosslessControl(receiver: receiver, store: store); Spacer(); BatteryIndicator(code: receiver.battery_code, connected: receiver.connected, charging: receiver.charging).accessibilityLabel("レシーバー電池") }.padding(.horizontal, 12).padding(.bottom, 10)
             HStack(spacing: 1) {
                 ForEach(receiver.transmitters) { tx in
-                    CompactChannel(tx: tx, receiver: receiver, store: store, compact: compact, showProcessing: showProcessing)
+                    CompactChannel(tx: tx, receiver: receiver, store: store, compact: compact, showProcessing: showProcessing, availableMeterHeight: availableMeterHeight)
                 }
             }.background(Console.line)
             HStack {
@@ -70,7 +71,8 @@ struct CompactChannel: View {
     var compact = false
     var showProcessing = true
     @State private var processing = false
-    private var meterHeight: Double { compact ? 180 : 250 }
+    var availableMeterHeight: Double? = nil
+    private var meterHeight: Double { availableMeterHeight ?? (compact ? 180 : 250) }
     private var destinations: [Int] {
         store.snapshot.routes.enumerated().compactMap { offset, route in
             offset < store.snapshot.bus_channels && route?.serial == receiver.serial && route?.channel == tx.index ? offset + 1 : nil
@@ -81,7 +83,7 @@ struct CompactChannel: View {
         return String(format: "%.0f%%", Double(tx.storage_remaining) / Double(tx.storage_total) * 100)
     }
     var body: some View {
-        VStack(spacing: compact ? 7 : 10) {
+        VStack(spacing: 5) {
             Button { store.selectControl(ControlSelection(receiver: receiver.serial, transmitter: tx.serial)) } label: {
                 HStack {
                     Text(String(format: "CH %02d", tx.index)).font(.system(size: 12, weight: .semibold, design: .monospaced))
@@ -90,7 +92,7 @@ struct CompactChannel: View {
                 }.frame(maxWidth: .infinity, minHeight: 22).contentShape(Rectangle())
             }.buttonStyle(ConsoleSelectionButton(selected: !tx.serial.isEmpty && store.controlSelection.contains(ControlSelection(receiver: receiver.serial, transmitter: tx.serial)))).disabled(tx.serial.isEmpty).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) を選択").help("⌘クリックで複数選択")
             Button { editing = true } label: {
-                Text(tx.label.isEmpty ? "—" : tx.label).font(.system(size: compact ? 11 : 13, weight: .semibold))
+                Text(tx.label.isEmpty ? "—" : tx.label).font(.system(size: compact ? 13 : 15, weight: .semibold))
                     .lineLimit(1).frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
             }.buttonStyle(ConsoleSelectionButton(labelPlate: true)).help("人物ラベル・マイクの引き継ぎ").popover(isPresented: $editing) {
                 LabelEditor(tx: tx, receiver: receiver, store: store)
@@ -103,7 +105,7 @@ struct CompactChannel: View {
             }.foregroundStyle(Console.muted)
             HStack(alignment: .top, spacing: 4) {
                 ProductionMeter(feed: store.feed(receiver.serial), channel: tx.index - 1, height: meterHeight)
-                GainControl(tx: tx, receiver: receiver, store: store, height: meterHeight, compact: compact)
+                GainControl(tx: tx, receiver: receiver, store: store, height: meterHeight, compact: availableMeterHeight != nil || compact)
             }
             Toggle(isOn: Binding(get: { tx.settings?["mute"] == 1 }, set: { muted in
                 store.send("setting", receiver: receiver, values: ["target": String(tx.index), "tx_serial": tx.serial, "key": "mute", "value": muted ? "1" : "0"])
@@ -123,7 +125,7 @@ struct CompactChannel: View {
             } label: {
                 HStack(spacing: 4) {
                     Circle().fill(tx.connected && tx.device_recording ? Color.red : Color(white: 0.28)).frame(width: 6, height: 6)
-                    Text(tx.connected && tx.device_recording ? "REC STOP" : "TX REC")
+                    Text(tx.connected && tx.device_recording ? "● REC / STOP" : "TX REC")
                 }.frame(maxWidth: .infinity, minHeight: compact ? 24 : 28).contentShape(Rectangle())
             }.buttonStyle(ConsoleCompactButton(active: tx.connected && tx.device_recording, color: .red, padding: 0)).foregroundStyle(tx.connected ? Color.red : Console.muted)
                 .disabled(!tx.connected || tx.serial.isEmpty)
@@ -139,7 +141,11 @@ struct CompactChannel: View {
                 Text(storage).monospacedDigit()
             }.font(.system(size: 9, design: .monospaced)).help("本体ストレージの空き容量")
             Rectangle().fill(Console.line).frame(height: 1)
-            if showProcessing {
+            if availableMeterHeight != nil {
+                Button { store.selectControl(ControlSelection(receiver: receiver.serial, transmitter: tx.serial)) } label: {
+                    HStack { Text("設定"); Spacer(); Image(systemName: "slider.horizontal.3") }.frame(maxWidth: .infinity, minHeight: 22)
+                }.buttonStyle(ConsoleCompactButton()).disabled(tx.serial.isEmpty).accessibilityLabel("TX\(tx.index) 設定を表示")
+            } else if showProcessing {
                 ProcessingControls(tx: tx, receiver: receiver, store: store)
             } else {
                 Button { processing = true } label: { Label("処理", systemImage: "slider.horizontal.3").frame(maxWidth: .infinity, minHeight: 22) }
@@ -154,7 +160,7 @@ struct CompactChannel: View {
             Text(destinations.isEmpty ? "OUT —" : "OUT " + destinations.prefix(2).map { String(format: "%02d", $0) }.joined(separator: ",") + (destinations.count > 2 ? "+" : ""))
                 .font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(Console.muted)
                 .help(destinations.isEmpty ? "共通入力への割り当てなし" : "共通入力: " + destinations.map { "CH \($0)" }.joined(separator: ", "))
-        }.font(.system(size: 9, design: .monospaced)).padding(.horizontal, compact ? 7 : 10).padding(.vertical, 10).frame(maxWidth: .infinity).background(Console.strip)
+        }.font(.system(size: 9, design: .monospaced)).padding(.horizontal, availableMeterHeight != nil ? 6 : compact ? 7 : 10).padding(.vertical, 10).frame(maxWidth: .infinity).background(Console.strip)
             .overlay(alignment: .top) { if !tx.serial.isEmpty && store.controlSelection.contains(ControlSelection(receiver: receiver.serial, transmitter: tx.serial)) { Rectangle().fill(Console.cyan).frame(height: 2) } }
     }
 }

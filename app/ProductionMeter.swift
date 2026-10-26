@@ -37,12 +37,22 @@ struct ProductionMeter: View {
                 MeterScale().equatable().frame(width: 23)
                 Canvas { context, size in
                     context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(white: 0.025)))
-                    for i in 0..<40 {
-                        let db = -60 + Double(i + 1) * 1.5
-                        let rect = CGRect(x: 1, y: size.height * Double(39-i)/40, width: size.width-2, height: max(1, size.height/40-1))
-                        let color = db > -6 ? red : db > -18 ? yellow : green
-                        context.fill(Path(rect), with: .color(color.opacity(meter.level >= db ? 1 : 0.065)))
+                    // レベルは量子化せず、細い区切りだけを一定の表示ピッチで重ねる。
+                    for (low, high, color) in [(-60.0, -18.0, green), (-18.0, -6.0, yellow), (-6.0, 0.0, red)] {
+                        let full = CGRect(x: 1, y: size.height * -high/60, width: size.width-2, height: size.height * (high-low)/60)
+                        context.fill(Path(full), with: .color(color.opacity(0.045)))
+                        let top = min(high, meter.level)
+                        if top > low {
+                            let lit = CGRect(x: 1, y: size.height * -top/60, width: size.width-2, height: size.height * (top-low)/60)
+                            context.fill(Path(lit), with: .color(color))
+                        }
                     }
+                    var divisions = Path()
+                    for y in stride(from: 3.0, to: size.height, by: 3.0) {
+                        divisions.move(to: CGPoint(x: 1, y: y))
+                        divisions.addLine(to: CGPoint(x: size.width-1, y: y))
+                    }
+                    context.stroke(divisions, with: .color(Color.black.opacity(0.55)), lineWidth: 0.5)
                     if meter.peak > -60 {
                         let y = max(0, size.height * -meter.peak/60)
                         context.fill(Path(CGRect(x: 0, y: y, width: size.width, height: 1.5)), with: .color(.white.opacity(0.85)))
@@ -62,7 +72,8 @@ struct ProductionMeter: View {
 private struct MeterScale: View, Equatable {
     var body: some View {
         Canvas(rendersAsynchronously: true) { context, size in
-            for db in [0, -6, -12, -18, -24, -36, -48, -60] {
+            let ticks = size.height < 100 ? [0, -18, -36, -60] : size.height < 160 ? [0, -12, -24, -36, -48, -60] : [0, -6, -12, -18, -24, -36, -48, -60]
+            for db in ticks {
                 let y = max(4, min(size.height - 4, size.height * Double(-db) / 60))
                 context.draw(Text(db == 0 ? "0" : "\(db)").font(.system(size: 8, design: .monospaced)).foregroundColor(db == -18 ? Color(white: 0.85) : Console.muted), at: CGPoint(x: size.width - 1, y: y), anchor: .trailing)
             }

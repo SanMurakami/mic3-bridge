@@ -242,8 +242,6 @@ struct MainView: View {
     @State private var outputMode = 3
     @State private var confirmTCOnly = false
     @State private var showingTC = false
-    @AppStorage("consoleCompact") private var compact = false
-    @AppStorage("consoleProcessing") private var showProcessing = true
     private var connected: Int { store.snapshot.receivers.filter(\.connected).count }
     var body: some View {
         VStack(spacing: 0) {
@@ -251,17 +249,9 @@ struct MainView: View {
                 if page != "routing" { transport }
                 if page == "overview" {
                     HStack(spacing: 0) {
-                    GeometryReader { geometry in
-                        let count = max(1, min(store.snapshot.receivers.count, Int((geometry.size.width - 20) / (compact ? 410 : 460))))
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 12) {
-                                errors
-                                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: count), spacing: 12) {
-                                    ForEach(store.snapshot.receivers) { ReceiverOverview(receiver: $0, store: store, compact: compact, showProcessing: showProcessing) }
-                                }
-                                if store.snapshot.receivers.isEmpty { ContentUnavailableView("接続なし", systemImage: "cable.connector") }
-                            }.padding(16)
-                        }
+                    VStack(spacing: 0) {
+                        errors
+                        ConsoleOverview(store: store)
                     }
                     if store.inspectorVisible { Divider(); DeviceInspector(store: store) }
                     }
@@ -299,7 +289,7 @@ struct MainView: View {
         }.buttonStyle(ConsoleSelectionButton(selected: page == id)).keyboardShortcut(key, modifiers: .command)
     }
     private var header: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 8) {
             Text("MIC 3 BRIDGE").font(.system(size: 11, weight: .bold)).tracking(1.5).padding(.horizontal, 18)
             nav("overview", "一覧", "slider.vertical.3", "1")
             nav("timeline", "タイムライン", "waveform.path", "2")
@@ -339,7 +329,7 @@ struct MainView: View {
             Spacer(minLength: 8)
             Picker("収録先", selection: $store.recordingMode) {
                 Text("Mac").tag("mac"); Text("本体").tag("device"); Text("両方").tag("both")
-            }.pickerStyle(.segmented).labelsHidden().frame(width: 166)
+            }.pickerStyle(.menu).labelsHidden().frame(width: 105)
             Button { recording(start: true) } label: { Label("一括収録", systemImage: "record.circle") }
                 .buttonStyle(ConsoleButton(active: store.targets.contains { (store.recordingMode != "device" && $0.recording) || (store.recordingMode != "mac" && $0.transmitters.contains { $0.device_recording }) }, color: .red)).disabled(store.targets.isEmpty || (store.recordingMode != "mac" && store.targetsBusy))
             Button { recording(start: false) } label: { Image(systemName: "stop.fill").frame(width: 20) }
@@ -351,8 +341,7 @@ struct MainView: View {
                 Text("INPUTS").font(.system(size: 9, weight: .semibold)).tracking(1.5).foregroundStyle(Console.muted)
                 Text("\(connected) RX / \(store.snapshot.receivers.flatMap(\.transmitters).filter(\.connected).count) TX").font(.system(size: 10, design: .monospaced)).foregroundStyle(Console.muted)
                 Spacer()
-                Toggle("処理設定", isOn: $showProcessing).toggleStyle(.button).controlSize(.small).help("AGC・NC・EQ・Low Cut の表示")
-                Picker("表示密度", selection: $compact) { Text("標準").tag(false); Text("コンパクト").tag(true) }.pickerStyle(.segmented).labelsHidden().frame(width: 150)
+
             }.padding(.horizontal, 16).frame(height: 38).background(Console.background)
         }
     }
