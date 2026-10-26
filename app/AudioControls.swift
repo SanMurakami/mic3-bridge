@@ -15,7 +15,7 @@ struct NativeGainFader: NSViewRepresentable {
         slider.focusRingType = .none
         slider.isVertical = true
         slider.isContinuous = false
-        slider.numberOfTickMarks = 5; slider.allowsTickMarkValuesOnly = false
+        slider.numberOfTickMarks = 0; slider.allowsTickMarkValuesOnly = false
         slider.setAccessibilityLabel(label)
         return slider
     }
@@ -43,9 +43,20 @@ struct GainControl: View {
     private var enabled: Bool { tx.connected && !tx.serial.isEmpty && (-12...12).contains(gain) && tx.agc == 0 && !store.settingsLocked }
     var body: some View {
         VStack(spacing: 6) {
-            Text("GAIN").font(.system(size: 7, weight: .semibold)).tracking(1).foregroundStyle(Console.muted).frame(height: 12)
+            Text("GAIN dB").font(.system(size: 7, weight: .semibold)).tracking(1).foregroundStyle(Console.muted).frame(height: 12)
+            HStack(spacing: 0) {
             NativeGainFader(value: (-12...12).contains(gain) ? gain : 0, enabled: enabled, label: "TX\(tx.index) / \(receiver.serial.suffix(6)) 入力ゲイン dB", action: set)
                 .frame(width: 25, height: height).disabled(!enabled)
+                Canvas { context, size in
+                    for db in [12, 6, 0, -6, -12] {
+                        // NSSliderのノブ中心が動く範囲に揃える。
+                        let y = 11 + (size.height - 22) * Double(12-db)/24
+                        var tick = Path(); tick.move(to: CGPoint(x: 0, y: y)); tick.addLine(to: CGPoint(x: db == 0 ? 5 : 3, y: y))
+                        context.stroke(tick, with: .color(db == 0 ? Color(white: 0.85) : Console.muted), lineWidth: 1)
+                        context.draw(Text(db > 0 ? "+\(db)" : "\(db)").font(.system(size: 7, design: .monospaced)).foregroundColor(Console.muted), at: CGPoint(x: 7, y: y), anchor: .leading)
+                    }
+                }.frame(width: 23, height: height).allowsHitTesting(false)
+            }
             HStack(spacing: 2) {
                 Button { set(gain - 1) } label: { Image(systemName: "minus").frame(width: compact ? 7 : 9, height: 16) }.disabled(!enabled || gain <= -12).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) ゲインを1dB下げる")
                 Text((-12...12).contains(gain) ? String(format: "%+d", gain) : "—").monospacedDigit().frame(width: compact ? 17 : 21)

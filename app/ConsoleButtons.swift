@@ -37,3 +37,29 @@ struct ConsoleCompactButton: ButtonStyle {
             .modifier(ConsoleButtonFace(active: active, color: color, pressed: configuration.isPressed))
     }
 }
+
+// 選択面と操作キーの表示を分ける。
+struct ConsoleSelectionButton: ButtonStyle {
+    var selected = false
+    var labelPlate = false
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.padding(.horizontal, 6).frame(minHeight: labelPlate ? 30 : 24)
+            .contentShape(Rectangle())
+            .modifier(SelectionSurface(selected: selected, labelPlate: labelPlate, pressed: configuration.isPressed))
+    }
+}
+private struct SelectionSurface: ViewModifier {
+    let selected: Bool
+    let labelPlate: Bool
+    let pressed: Bool
+    @State private var hovered = false
+    func body(content: Content) -> some View {
+        content
+            .background(labelPlate ? Color(white: pressed ? 0.16 : 0.08) : Color.white.opacity(hovered || pressed ? 0.08 : selected ? 0.05 : 0))
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(selected ? Console.cyan : Color.white.opacity(hovered ? 0.4 : labelPlate ? 0.2 : 0.08)).frame(height: selected ? 2 : 1).allowsHitTesting(false)
+            }
+            .onHover { hovered = $0 }
+            .transaction { $0.animation = nil }
+    }
+}

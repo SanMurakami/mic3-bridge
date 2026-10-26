@@ -17,7 +17,7 @@ struct ReceiverOverview: View {
                 StatusDot(active: receiver.connected)
                 Button { store.selectControl(ControlSelection(receiver: receiver.serial)) } label: {
                     Text(receiver.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                }.buttonStyle(ConsoleCompactButton(active: store.controlSelection.contains(ControlSelection(receiver: receiver.serial)))).accessibilityLabel("RX \(receiver.serial.suffix(6)) を選択")
+                }.buttonStyle(ConsoleSelectionButton(selected: store.controlSelection.contains(ControlSelection(receiver: receiver.serial)))).accessibilityLabel("RX \(receiver.serial.suffix(6)) を選択")
                 Spacer()
                 ProgressView().controlSize(.mini).opacity(receiver.control_busy ? 1 : 0).frame(width: 12)
                 Text(receiver.tc.enabled && receiver.tc.known ? (receiver.tc.output == 1 ? "USB TC×4" : "TC ON") : "TC OFF")
@@ -84,18 +84,24 @@ struct CompactChannel: View {
         VStack(spacing: compact ? 7 : 10) {
             Button { store.selectControl(ControlSelection(receiver: receiver.serial, transmitter: tx.serial)) } label: {
                 HStack {
-                    Text(String(format: "%02d", tx.index)).font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    Text(String(format: "CH %02d", tx.index)).font(.system(size: 12, weight: .semibold, design: .monospaced))
                         .foregroundStyle(tx.connected ? Color(white: 0.9) : Console.muted)
                     Spacer(); StatusDot(active: tx.connected)
                 }.frame(maxWidth: .infinity, minHeight: 22).contentShape(Rectangle())
-            }.buttonStyle(ConsoleCompactButton(active: !tx.serial.isEmpty && store.controlSelection.contains(ControlSelection(receiver: receiver.serial, transmitter: tx.serial)), color: Console.cyan, height: 22, padding: 3)).disabled(tx.serial.isEmpty).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) を選択").help("⌘クリックで複数選択")
+            }.buttonStyle(ConsoleSelectionButton(selected: !tx.serial.isEmpty && store.controlSelection.contains(ControlSelection(receiver: receiver.serial, transmitter: tx.serial)))).disabled(tx.serial.isEmpty).accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) を選択").help("⌘クリックで複数選択")
             Button { editing = true } label: {
                 Text(tx.label.isEmpty ? "—" : tx.label).font(.system(size: compact ? 11 : 13, weight: .semibold))
                     .lineLimit(1).frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
-            }.buttonStyle(ConsoleCompactButton()).help("人物ラベル・マイクの引き継ぎ").popover(isPresented: $editing) {
+            }.buttonStyle(ConsoleSelectionButton(labelPlate: true)).help("人物ラベル・マイクの引き継ぎ").popover(isPresented: $editing) {
                 LabelEditor(tx: tx, receiver: receiver, store: store)
             }
-            HStack(alignment: .top, spacing: 1) {
+            HStack(spacing: 4) {
+                Rectangle().fill(tx.connected ? Color.green : Console.muted.opacity(0.35)).frame(width: 5, height: 5)
+                Text(tx.connected ? "LINK" : "OFFLINE").font(.system(size: 8, weight: .medium, design: .monospaced))
+                Spacer(minLength: 0)
+                Text(tx.serial.isEmpty ? "—" : String(tx.serial.suffix(4))).font(.system(size: 8, design: .monospaced))
+            }.foregroundStyle(Console.muted)
+            HStack(alignment: .top, spacing: 4) {
                 ProductionMeter(feed: store.feed(receiver.serial), channel: tx.index - 1, height: meterHeight)
                 GainControl(tx: tx, receiver: receiver, store: store, height: meterHeight, compact: compact)
             }
@@ -103,7 +109,7 @@ struct CompactChannel: View {
                 store.send("setting", receiver: receiver, values: ["target": String(tx.index), "tx_serial": tx.serial, "key": "mute", "value": muted ? "1" : "0"])
             })) {
                 HStack(spacing: 4) {
-                    Image(systemName: tx.settings?["mute"] == 1 ? "mic.slash.fill" : "mic.fill")
+                    Rectangle().fill(tx.settings?["mute"] == 1 ? Console.cyan : Color(white: 0.28)).frame(width: 5, height: 5)
                     Text("MUTE")
                     Text(tx.settings?["mute"].map { $0 == 1 ? "ON" : "OFF" } ?? "—").foregroundStyle(Console.cyan)
                 }.frame(maxWidth: .infinity, minHeight: compact ? 24 : 28).contentShape(Rectangle())
@@ -116,14 +122,22 @@ struct CompactChannel: View {
                 store.send("device_record_tx", receiver: receiver, values: ["target": String(tx.index), "tx_serial": tx.serial, "value": tx.device_recording ? "0" : "1"])
             } label: {
                 HStack(spacing: 4) {
-                    Image(systemName: tx.connected && tx.device_recording ? "stop.fill" : "record.circle")
-                    Text(!tx.connected ? "OFFLINE" : "REC")
+                    Circle().fill(tx.connected && tx.device_recording ? Color.red : Color(white: 0.28)).frame(width: 6, height: 6)
+                    Text(tx.connected && tx.device_recording ? "REC STOP" : "TX REC")
                 }.frame(maxWidth: .infinity, minHeight: compact ? 24 : 28).contentShape(Rectangle())
             }.buttonStyle(ConsoleCompactButton(active: tx.connected && tx.device_recording, color: .red, padding: 0)).foregroundStyle(tx.connected ? Color.red : Console.muted)
                 .disabled(!tx.connected || tx.serial.isEmpty)
                 .accessibilityLabel("TX\(tx.index) / \(receiver.serial.suffix(6)) 本体録音\(tx.device_recording ? "停止" : "開始")")
-            BatteryIndicator(code: tx.battery_code, connected: tx.connected, charging: tx.charging)
-            HStack(spacing: 4) { Image(systemName: "internaldrive"); Text(storage) }.foregroundStyle(Console.muted).help("本体ストレージの空き容量")
+            HStack {
+                Text("BAT").foregroundStyle(Console.muted)
+                Spacer(minLength: 2)
+                BatteryIndicator(code: tx.battery_code, connected: tx.connected, charging: tx.charging)
+            }.font(.system(size: 8, design: .monospaced))
+            HStack {
+                Text("FREE").foregroundStyle(Console.muted)
+                Spacer()
+                Text(storage).monospacedDigit()
+            }.font(.system(size: 9, design: .monospaced)).help("本体ストレージの空き容量")
             Rectangle().fill(Console.line).frame(height: 1)
             if showProcessing {
                 ProcessingControls(tx: tx, receiver: receiver, store: store)
@@ -137,10 +151,10 @@ struct CompactChannel: View {
                         }.padding(18).frame(width: 230)
                     }
             }
-            Text(destinations.isEmpty ? "M —" : "M " + destinations.prefix(2).map { String(format: "%02d", $0) }.joined(separator: ",") + (destinations.count > 2 ? "+" : ""))
+            Text(destinations.isEmpty ? "OUT —" : "OUT " + destinations.prefix(2).map { String(format: "%02d", $0) }.joined(separator: ",") + (destinations.count > 2 ? "+" : ""))
                 .font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(Console.muted)
                 .help(destinations.isEmpty ? "共通入力への割り当てなし" : "共通入力: " + destinations.map { "CH \($0)" }.joined(separator: ", "))
-        }.font(.system(size: 9, design: .monospaced)).padding(.horizontal, compact ? 8 : 12).padding(.vertical, 10).frame(maxWidth: .infinity).background(Console.strip)
+        }.font(.system(size: 9, design: .monospaced)).padding(.horizontal, compact ? 7 : 10).padding(.vertical, 10).frame(maxWidth: .infinity).background(Console.strip)
             .overlay(alignment: .top) { if !tx.serial.isEmpty && store.controlSelection.contains(ControlSelection(receiver: receiver.serial, transmitter: tx.serial)) { Rectangle().fill(Console.cyan).frame(height: 2) } }
     }
 }

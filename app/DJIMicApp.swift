@@ -170,10 +170,10 @@ final class SnapshotReader: @unchecked Sendable {
 enum Console {
     static let cyan = Color(red: 0.35, green: 0.82, blue: 0.98)
     static let background = Color(white: 0.065)
-    static let panel = Color(white: 0.115)
-    static let strip = Color(white: 0.085)
+    static let panel = Color(white: 0.15)
+    static let strip = Color(white: 0.115)
     static let line = Color.white.opacity(0.08)
-    static let muted = Color(red: 0.48, green: 0.54, blue: 0.61)
+    static let muted = Color(white: 0.60)
     static let fps = ["23.98", "24", "25", "29.97", "29.97 DF", "30", "50", "60"]
     static let outputs = ["L-IN", "L-OUT", "A-OUT", "N/A"]
     static func batteryBars(_ code: Int) -> Int? { (1...7).contains(code) ? 7 - code : nil }
@@ -296,7 +296,7 @@ struct MainView: View {
                 .foregroundStyle(page == id ? Color.white : Console.muted)
                 .background(page == id ? Color.white.opacity(0.06) : .clear)
                 .overlay(alignment: .bottom) { if page == id { Rectangle().fill(Console.cyan).frame(height: 2) } }
-        }.buttonStyle(ConsoleCompactButton(active: page == id, height: 42, padding: 0)).keyboardShortcut(key, modifiers: .command)
+        }.buttonStyle(ConsoleSelectionButton(selected: page == id)).keyboardShortcut(key, modifiers: .command)
     }
     private var header: some View {
         HStack(spacing: 0) {
@@ -341,7 +341,7 @@ struct MainView: View {
                 Text("Mac").tag("mac"); Text("本体").tag("device"); Text("両方").tag("both")
             }.pickerStyle(.segmented).labelsHidden().frame(width: 166)
             Button { recording(start: true) } label: { Label("一括収録", systemImage: "record.circle") }
-                .buttonStyle(ConsoleButton(active: true, color: .red)).disabled(store.targets.isEmpty || (store.recordingMode != "mac" && store.targetsBusy))
+                .buttonStyle(ConsoleButton(active: store.targets.contains { (store.recordingMode != "device" && $0.recording) || (store.recordingMode != "mac" && $0.transmitters.contains { $0.device_recording }) }, color: .red)).disabled(store.targets.isEmpty || (store.recordingMode != "mac" && store.targetsBusy))
             Button { recording(start: false) } label: { Image(systemName: "stop.fill").frame(width: 20) }
                 .buttonStyle(ConsoleButton()).disabled(store.targets.isEmpty).accessibilityLabel("選択対象の収録を停止").help("選択対象の収録を停止")
         }.padding(.horizontal, 16).padding(.vertical, 12).background(Console.panel)
