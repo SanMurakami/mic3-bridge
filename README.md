@@ -32,28 +32,27 @@ macOSの「機器セット」も試しましたが、USBを抜き差しした後
 
 ## インストール
 
-macOS 14以降と、XcodeまたはCommand Line Toolsが必要です。\
-ソースからビルドしてインストールします。
+macOS 14以降のApple Silicon／Intel Macで使えます。\
+[Releases](https://github.com/SanMurakami/mic3-bridge/releases/latest) から `Mic3Bridge-*-universal.pkg` をダウンロードしてください。\
+アプリとドライバーを同梱しているため、Xcodeやビルド作業は不要です。
 
-```sh
-./Install.command
-```
-
+録音を終了し、DJI Mic 3 Bridgeと音声を使用するアプリを閉じてから、pkgを開いてインストールしてください。\
 導入には管理者認証が必要です。\
 Core Audioが再起動するため、ほかの音声アプリも一時的に切断されます。\
-初回起動時はマイクへのアクセスを許可してください。
+完了後は「アプリケーション」からDJI Mic 3 Bridgeを開き、初回起動時にマイクへのアクセスを許可してください。
+
+配布ファイルにはDeveloper ID署名とAppleの公証が付いていません。\
+macOSにブロックされた場合は、配布元を確認したうえで「システム設定 → プライバシーとセキュリティ → このまま開く」から許可してください。\
+詳しくは [Appleの説明](https://support.apple.com/ja-jp/102445) を参照してください。
+
+リリース用ファイルは [GitHub Actions](https://github.com/SanMurakami/mic3-bridge/actions/workflows/build.yml) で生成し、Apple Silicon／Intelの両環境でテストしています。\
+SHA-256チェックサムとGitHubのビルド証明も公開しています。\
+実機での動作確認はApple Silicon Macで行っています。
 
 レシーバーをUSB接続するとアプリに表示されます。\
 DAW側で「DJI Mic3 Matrix」を入力に選び、アプリの「ルーティング」で割り当てを設定します。
 
-アプリだけを更新する場合は、次のコマンドを使います。\
-Core Audioは再起動しません。
-
-```sh
-./Install.command --app-only
-```
-
-削除には `Uninstall.command` を使います。
+削除する場合は、このリポジトリをダウンロードして `Uninstall.command` を実行してください。
 
 ## 録音とTC
 
@@ -67,12 +66,21 @@ A-OUTではCH1がTC信号になります。
 
 ## 開発
 
+ソースからのビルドにはXcodeまたはCommand Line Toolsが必要です。
+
 ```sh
 bash scripts/build.sh
 bash scripts/test.sh
+bash scripts/package.sh
 ```
 
 `build.sh` はアプリとドライバーを `.build/` に生成し、ad-hoc署名を付けます。\
-`test.sh` はドライバー、パケット処理、録音、ルーティングなどのテストを実行します。
+`test.sh` はドライバー、パケット処理、録音、ルーティングなどのテストを実行します。\
+`package.sh` は両アーキテクチャをビルドし、インストーラーを `.build/release/` に生成します。
+
+ソースから直接インストールする場合は `./Install.command` を実行してください。\
+アプリだけを更新する `./Install.command --app-only` では、Core Audioを再起動しません。
+
+`v0.11.0` のようにアプリのバージョンと一致するタグをpushすると、Actionsがビルド・テスト後にReleaseを公開します。
 
 サードパーティーライセンスは [vendor/apple-null-audio/LICENSE.txt](vendor/apple-null-audio/LICENSE.txt) に記載しています。

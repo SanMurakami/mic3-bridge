@@ -1,0 +1,111 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build universal installer
+        run: bash scripts/package.sh
+      - name: Verify package
+        run: bash scripts/verify-package.sh .build/release/*.pkg
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer
+          path: .build/release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installer
+          path: .build/release
+      - name: Verify checksum
+        working-directory: .build/release
+        run: shasum -a 256 -c SHA256SUMS.txt
+      - name: Run tests
+        run: bash scripts/test.sh
+      - name: Test installation and upgrade
+        run: bash scripts/test-install.sh .build/release/*.pkg
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installer
+          path: release
+      - name: Verify checksum
+        working-directory: release
+        run: sha256sum -c SHA256SUMS.txt
+      - name: Attest installer
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*.pkg
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<'NOTES'
+          macOS 14以降のApple Silicon／Intel Mac向けインストーラーです。\
+          アプリとCore Audioドライバーを同梱しており、Xcodeやビルド作業は不要です。
+
+          1. Assetsの `Mic3Bridge-*-universal.pkg` をダウンロードします。
+          2. 録音を終了し、DJI Mic 3 Bridgeと音声を使用するアプリを閉じてからインストールします。
+          3. 「アプリケーション」からDJI Mic 3 Bridgeを開き、マイクへのアクセスを許可します。
+          4. レシーバーを接続し、DAWの入力に「DJI Mic3 Matrix」を選びます。
+
+          インストールには管理者認証が必要です。\
+          最後にCore Audioが再起動します。\
+          USBで音声を取り込むときは、TC出力を **N/A** に設定してください。
+
+          **Developer ID署名・Appleの公証は付いていません。**
+          macOSにブロックされた場合は、配布元を確認したうえで「システム設定 → プライバシーとセキュリティ → このまま開く」から許可してください。
+          [Appleの説明](https://support.apple.com/ja-jp/102445)
+
+          ビルドとテストはGitHub Actionsで実行しています。\
+          SHA-256チェックサムとGitHubのビルド証明を付けています。\
+          ハードウェアでの確認対象はDJI Mic 3とApple Silicon Macです。
+          NOTES
+          printf '\n[ビルド・テストの実行結果](%s)\n' "$RUN_URL" >> "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" release/*.pkg release/SHA256SUMS.txt \
+            --verify-tag --title "DJI Mic 3 Bridge $TAG" --notes-file "$RUNNER_TEMP/notes.md"

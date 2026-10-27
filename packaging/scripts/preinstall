@@ -1,0 +1,10 @@
+#!/bin/bash
+set -euo pipefail
+if [[ "${3:-/}" != / ]]; then
+    echo '起動中のmacOSボリュームへインストールしてください。' >&2
+    exit 1
+fi
+if /usr/bin/pgrep -x 'DJIMicBridge|dji-mic-bridge|dji-mic-control' >/dev/null; then
+    echo 'DJI Mic 3 Bridgeを終了してから、インストールをやり直してください。' >&2
+    exit 1
+fi

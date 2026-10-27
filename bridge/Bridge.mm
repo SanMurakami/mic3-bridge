@@ -352,7 +352,7 @@ public:
             unsigned ch=0;for(auto& [serial,r]:receivers){for(unsigned source=1;source<=4&&ch<64;source++,ch++)routes[ch]=@{@"serial":ns(serial),@"channel":@(source)};}save();saveRouting();
         }
         auto plug=plugin();if(plug!=lastPlugin){configDirty=true;lastPlugin=plug;}
-        globalError=plug?"":"専用 HAL ドライバーが見つかりません。Install.command を実行してください。";
+        globalError=plug?"":"専用 HAL ドライバーが見つかりません。インストーラーから再インストールしてください。";
         if(plug&&configDirty){NSMutableArray *rows=driverRows();
             auto a=addr(DJI_DEVICES_SELECTOR);CFArrayRef value=(__bridge CFArrayRef)rows;
             auto error=AudioObjectSetPropertyData(plug,&a,0,nullptr,sizeof(value),&value);

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>DJI Mic 3 Bridge</title>
+    <welcome file="Welcome.html" mime-type="text/html"/>
+    <conclusion file="Conclusion.html" mime-type="text/html"/>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <volume-check><allowed-os-versions><os-version min="14.0"/></allowed-os-versions></volume-check>
+    <choices-outline><line choice="bridge"/></choices-outline>
+    <choice id="bridge" visible="false" title="DJI Mic 3 Bridge" description="アプリとCore Audioドライバー">
+        <pkg-ref id="local.dji-mic.bridge.installer"/>
+    </choice>
+    <pkg-ref id="local.dji-mic.bridge.installer">Mic3Bridge-component.pkg</pkg-ref>
+    <pkg-ref id="local.dji-mic.bridge.installer">
+        <must-close><app id="local.dji-mic.bridge"/></must-close>
+    </pkg-ref>
+</installer-gui-script>

@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+if [[ "${3:-/}" == / ]]; then
+    /usr/bin/killall -TERM coreaudiod 2>/dev/null || true
+fi
