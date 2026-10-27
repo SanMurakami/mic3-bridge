@@ -1,3 +1,5 @@
+![Mic 3 Bridge](assets/overview.png)
+
 # DJI Mic 3 Bridge
 
 複数のDJI Mic 3レシーバーをmacOSで使うためのアプリとCore Audioドライバーです。\

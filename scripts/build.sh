@@ -20,6 +20,7 @@ clang++ -std=c++17 -O2 -fobjc-arc -Wall -Wextra -Werror -framework Foundation -f
 swiftc -O -parse-as-library -warnings-as-errors -framework SwiftUI -framework AppKit -framework AVFoundation \
     "$repo_dir/app/"*.swift -o "$app_dir/MacOS/DJIMicBridge"
 cp "$repo_dir/packaging/Bridge-Info.plist" "$app_dir/Info.plist"
+cp "$repo_dir/assets/AppIcon.icns" "$app_dir/Resources/AppIcon.icns"
 codesign --force --sign - "$build_dir/DJIMicInputs.driver"
 codesign --force --sign - "$app_dir/MacOS/dji-mic-bridge"
 codesign --force --sign - "$app_dir/MacOS/dji-mic-control"

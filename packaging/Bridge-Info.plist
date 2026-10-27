@@ -5,6 +5,7 @@
 <key>CFBundleIdentifier</key><string>local.dji-mic.bridge</string>
 <key>CFBundleName</key><string>DJI Mic 3 Bridge</string>
 <key>CFBundleDisplayName</key><string>DJI Mic 3 Bridge</string>
+<key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>22</string>
 <key>CFBundleShortVersionString</key><string>0.11.0</string>
